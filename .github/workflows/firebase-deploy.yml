@@ -24,9 +24,20 @@ jobs:
           workload_identity_provider: projects/465339579029/locations/global/workloadIdentityPools/github-plcocina/providers/github-actions
           service_account: github-firebase-deploy@plcocina-apps.iam.gserviceaccount.com
           project_id: plcocina-apps
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Verify Google Cloud credentials
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Check federated credentials
+        run: |
+          test -f "$GOOGLE_APPLICATION_CREDENTIALS"
+          gcloud auth application-default print-access-token >/dev/null
+          echo "Federated Google Cloud credentials are available"
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools@15.22.1
 
       - name: Deploy only portal site
-        run: firebase deploy --only hosting:portal --project plcocina-apps --non-interactive
+        run: firebase deploy --only hosting:portal --project plcocina-apps --non-interactive --debug
