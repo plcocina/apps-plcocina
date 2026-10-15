@@ -26,7 +26,7 @@ jobs:
           project_id: plcocina-apps
 
       - name: Install Firebase CLI
-        run: npm install -g firebase-tools
+        run: npm install -g firebase-tools@15.22.1
 
       - name: Deploy only portal site
         run: firebase deploy --only hosting:portal --project plcocina-apps --non-interactive
