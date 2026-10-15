@@ -1,0 +1,1 @@
+{"hosting":{"target":"portal","public":".","ignore":["firebase.json",".firebaserc","**/.*","**/node_modules/**","README.md"]}}
