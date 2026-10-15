@@ -1,0 +1,32 @@
+name: Deploy APPS PL COCINA Portal
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy Portal Hosting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/465339579029/locations/global/workloadIdentityPools/github-plcocina/providers/github-actions
+          service_account: github-firebase-deploy@plcocina-apps.iam.gserviceaccount.com
+          project_id: plcocina-apps
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy only portal site
+        run: firebase deploy --only hosting:portal --project plcocina-apps --non-interactive
