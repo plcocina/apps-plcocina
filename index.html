@@ -11,7 +11,7 @@
 *{box-sizing:border-box}body{margin:0;color:var(--black);font-family:Inter,Arial,sans-serif;-webkit-font-smoothing:antialiased}a{color:inherit}.wrap{width:min(1120px,calc(100% - 44px));margin:auto}
 .top{border-bottom:1px solid var(--line)}.nav{min-height:83px;display:flex;align-items:center;justify-content:space-between;gap:18px}
 .brand{display:flex;align-items:center;gap:13px;font-weight:800;letter-spacing:-.7px;font-size:19px;text-decoration:none}
-.brand-icon{display:grid;place-items:center;width:43px;height:43px;border-radius:12px;background:var(--yellow);border:2px solid #111}
+.brand-icon{display:block;width:43px;height:43px;border-radius:12px;object-fit:cover}
 .nav-tag{font-size:12px;font-weight:700;border-radius:100px;background:#f5f5f3;padding:10px 14px}
 .hero{background:linear-gradient(117deg,#FFF9DF 0%,#FFFCF1 57%,#fff 100%);border-bottom:1px solid #F2EBCB}
 .hero-inner{padding:79px 0 78px;max-width:920px}.eyebrow{display:flex;align-items:center;gap:10px;font-size:12px;font-weight:800;letter-spacing:1.7px;text-transform:uppercase}
@@ -37,7 +37,7 @@ footer{border-top:1px solid var(--line);padding:27px 0;color:#777;font-size:12px
 @media(prefers-reduced-motion:reduce){.app{transition:none}}
 </style></head>
 <body>
-<header class="top"><div class="wrap nav"><a class="brand" href="/" aria-label="Inicio APPS PL COCINA"><span class="brand-icon" aria-hidden="true">▦</span><span>APPS <span style="font-weight:500">PL COCINA</span></span></a><span class="nav-tag">Portal de aplicaciones</span></div></header>
+<header class="top"><div class="wrap nav"><a class="brand" href="/" aria-label="Inicio APPS PL COCINA"><img class="brand-icon" src="logo_PL-Cocina-icono.png" alt=""><span>APPS <span style="font-weight:500">PL COCINA</span></span></a><span class="nav-tag">Portal de aplicaciones</span></div></header>
 <section class="hero"><div class="wrap"><div class="hero-inner"><div class="eyebrow">Transformación digital</div><h1>Herramientas para<br>decidir mejor<span style="color:#D3A600">.</span></h1><p>Un solo lugar para acceder a las aplicaciones que impulsan la producción, la logística, la administración y la calidad de PL COCINA.</p><p class="motto">Registrar mejor. Comprender más rápido. Decidir con evidencia.</p></div></div></section>
 <main class="wrap"><div class="section-head"><div><h2>Nuestras aplicaciones</h2><p>Selecciona la herramienta que necesitas para comenzar.</p></div><span class="count">1 aplicación disponible</span></div>
 <div class="grid">
