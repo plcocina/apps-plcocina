@@ -13,7 +13,9 @@
 .top{border-bottom:1px solid var(--line)}.nav{min-height:83px;display:flex;align-items:center;justify-content:space-between;gap:18px}
 .brand{display:flex;align-items:center;gap:13px;font-weight:800;letter-spacing:-.7px;font-size:19px;text-decoration:none}
 .brand-icon{display:block;width:43px;height:43px;border:2px solid #111;border-radius:12px;object-fit:cover}
-.nav-tag{font-size:12px;font-weight:700;border-radius:100px;background:#f5f5f3;padding:10px 14px}
+.nav-actions{display:flex;align-items:center;gap:10px}.nav-tag{font-size:12px;font-weight:700;border-radius:100px;background:#f5f5f3;padding:10px 14px}
+.admin-link{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:10px 14px;color:var(--black);font-size:12px;font-weight:700;text-decoration:none;transition:background-color .2s,border-color .2s}
+.admin-link svg{width:15px;height:15px}.admin-link:hover{background:var(--cream);border-color:#C9C38D}.admin-link:focus-visible{outline:3px solid var(--yellow);outline-offset:3px}
 .hero{background:linear-gradient(117deg,#FFF9DF 0%,#FFFCF1 57%,#fff 100%);border-bottom:1px solid #F2EBCB}
 .hero-inner{padding:79px 0 78px;max-width:920px}.eyebrow{display:flex;align-items:center;gap:10px;font-size:12px;font-weight:800;letter-spacing:1.7px;text-transform:uppercase}
 .eyebrow:before{content:"";width:29px;height:5px;border-radius:4px;background:var(--yellow)}
@@ -34,11 +36,11 @@ h2{font-size:30px;letter-spacing:-1px;margin:0 0 8px}.section-head p{margin:0;co
 .principle-icon{width:48px;height:48px;border-radius:14px;background:white;display:grid;place-items:center;font-size:23px;flex:none}.principle strong{font-size:15px}.principle p{margin:6px 0 0;color:#666;font-size:13px;line-height:1.7}
 footer{border-top:1px solid var(--line);padding:27px 0;color:#777;font-size:12px}.footer-inner{display:flex;align-items:center;justify-content:space-between;gap:14px}
 @media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-inner{padding:64px 0}h1{letter-spacing:-2px}}
-@media(max-width:580px){.wrap{width:calc(100% - 32px)}.nav{min-height:74px}.brand{font-size:16px}.brand-icon{width:39px;height:39px}.nav-tag{font-size:10px;padding:8px}.hero-inner{padding:57px 0 60px}.grid{grid-template-columns:1fr}.section-head{align-items:start}h2{font-size:27px}.count{font-size:10px}.principle{align-items:start;padding:22px;gap:14px}.footer-inner{align-items:start;flex-direction:column}main{padding:48px 0 65px}}
+@media(max-width:580px){.wrap{width:calc(100% - 32px)}.nav{min-height:74px}.brand{font-size:16px}.brand-icon{width:39px;height:39px}.nav-tag{display:none}.admin-link{padding:9px 11px}.hero-inner{padding:57px 0 60px}.grid{grid-template-columns:1fr}.section-head{align-items:start}h2{font-size:27px}.count{font-size:10px}.principle{align-items:start;padding:22px;gap:14px}.footer-inner{align-items:start;flex-direction:column}main{padding:48px 0 65px}}
 @media(prefers-reduced-motion:reduce){.app{transition:none}}
 </style></head>
 <body>
-<header class="top"><div class="wrap nav"><a class="brand" href="/" aria-label="Inicio APPS PL COCINA"><img class="brand-icon" src="logo_PL-Cocina-icono.png" alt=""><span>APPS <span style="font-weight:500">PL COCINA</span></span></a><span class="nav-tag">Portal de aplicaciones</span></div></header>
+<header class="top"><div class="wrap nav"><a class="brand" href="/" aria-label="Inicio APPS PL COCINA"><img class="brand-icon" src="logo_PL-Cocina-icono.png" alt=""><span>APPS <span style="font-weight:500">PL COCINA</span></span></a><div class="nav-actions"><span class="nav-tag">Portal de aplicaciones</span><a class="admin-link" href="/admin" aria-label="Acceso administrativo"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Admin</span></a></div></div></header>
 <section class="hero"><div class="wrap"><div class="hero-inner"><div class="eyebrow">Transformación digital</div><h1>Herramientas para<br>decidir mejor<span style="color:#D3A600">.</span></h1><p>Un solo lugar para acceder a las aplicaciones que impulsan la producción, la logística, la administración y la calidad de PL COCINA.</p><p class="motto">Registrar mejor. Comprender más rápido. Decidir con evidencia.</p></div></div></section>
 <main class="wrap"><div class="section-head"><div><h2>Nuestras aplicaciones</h2><p>Selecciona la herramienta que necesitas para comenzar.</p></div><span class="count">2 aplicaciones disponibles</span></div>
 <div class="grid">
