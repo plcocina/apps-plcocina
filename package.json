@@ -1,0 +1,18 @@
+{
+  "name": "apps-plcocina-portal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Portal público y acceso privado de APPS PL COCINA.",
+  "scripts": {
+    "check": "node --check public/assets/firebase-client-config.js && node --check public/assets/admin-auth.js && node --check scripts/bootstrap-super-admin.mjs && node test/validate-structure.mjs",
+    "super-admin:check": "node scripts/bootstrap-super-admin.mjs",
+    "super-admin:apply": "node scripts/bootstrap-super-admin.mjs --apply"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "firebase-admin": "14.5.0"
+  }
+}
