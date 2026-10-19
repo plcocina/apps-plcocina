@@ -1,6 +1,6 @@
 # Desarrollo y operación del backend administrativo
 
-## Alcance de Fase 2A
+## Alcance de Fase 2B
 
 La función `adminApi` contiene únicamente:
 
@@ -41,22 +41,37 @@ Para inspección manual completa, sin conexión a producción:
 firebase emulators:start --project demo-plcocina-apps --only auth,functions,firestore
 ```
 
-## Configuración de producción pendiente
+## Configuración preparada
+
+- Runtime Node.js 22 en `us-central1`.
+- Cuenta de runtime fijada a `portal-admin-api@plcocina-apps.iam.gserviceaccount.com`.
+- Codebase `admin-api`, sin rewrites de Hosting.
+- Workflow independiente `.github/workflows/firebase-functions-deploy.yml`.
+- Disparo exclusivamente manual, confirmación literal `DEPLOY` y environment `admin-api-production`.
+- Pruebas unitarias, estáticas y de reglas antes de autenticar o desplegar.
+- Despliegue limitado a `firebase deploy --only functions:admin-api`.
+
+El archivo temporal `gha-creds-*.json` creado por la acción oficial de autenticación contiene configuración federada de corta duración, no una clave privada de cuenta de servicio; está ignorado por Git y la acción lo elimina al finalizar.
+
+## Configuración administrativa pendiente
 
 Antes del primer despliegue se debe:
 
-1. Crear una cuenta de servicio de runtime sin claves.
-2. Asignar sólo los permisos revisados en `docs/backend-iam.md`.
-3. Declarar esa cuenta en la configuración de `adminApi`.
-4. Confirmar región `us-central1`, límites, concurrencia, ingress y política de invocación.
-5. Revisar las reglas Firestore existentes del proyecto. Desplegar este archivo sin integrar reglas preexistentes podría bloquear otras cargas.
-6. Crear Firestore e índices únicamente después de aprobar el entorno y la ubicación de datos.
-7. Crear un workflow de backend separado. El workflow existente de Hosting debe conservar `--only hosting:portal`.
-8. Desplegar primero la función y sólo después considerar un rewrite de Hosting.
+1. Crear o elegir una cuenta de despliegue distinta de las cuentas de Hosting y runtime.
+2. Configurar Workload Identity Federation y los permisos descritos en `docs/backend-iam.md`.
+3. Crear las variables GitHub `FUNCTIONS_DEPLOY_SERVICE_ACCOUNT` y `GCP_WORKLOAD_IDENTITY_PROVIDER`.
+4. Proteger el environment `admin-api-production` con revisores obligatorios y limitarlo a `main`.
+5. Confirmar que las APIs de Cloud Functions, Cloud Run, Cloud Build y Artifact Registry ya estén habilitadas; el workflow no las habilita.
+6. Verificar la cuenta de servicio de compilación elegida por Cloud Build y sus permisos administrados.
+7. Confirmar la política de invocación HTTPS antes del primer despliegue. CORS y la autenticación de aplicación no reemplazan IAM de invocación.
+8. Revisar las reglas Firestore existentes. Este workflow no despliega reglas ni índices.
+9. Desplegar primero la función y sólo después considerar un rewrite de Hosting en otra fase.
 
-## Despliegue futuro
+## Primer despliegue futuro
 
-Los comandos siguientes son referencia y no deben ejecutarse durante Fase 2A:
+Después de completar IAM, ejecutar manualmente el workflow **Deploy adminApi Function** desde el commit aprobado en `main` e introducir `DEPLOY`. Un push no ejecuta este workflow.
+
+Secuencia equivalente de validación local:
 
 ```bash
 npm --prefix functions ci
@@ -66,7 +81,7 @@ npm run functions:test:emulator
 firebase deploy --only functions:admin-api --project plcocina-apps
 ```
 
-El selector definitivo de despliegue deberá verificarse contra el codebase antes de crear el workflow. Las reglas e índices se desplegarán en una operación separada y con revisión explícita.
+El selector `functions:admin-api` corresponde al campo `codebase` de `firebase.json`; despliega únicamente ese codebase. Las reglas, índices y Hosting no están incluidos.
 
 ## Reversión futura
 

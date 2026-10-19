@@ -1,0 +1,88 @@
+name: Deploy adminApi Function
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Escribe DEPLOY para confirmar el despliegue de adminApi"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: admin-api-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test and deploy adminApi
+    if: ${{ inputs.confirmation == 'DEPLOY' }}
+    runs-on: ubuntu-latest
+    environment: admin-api-production
+    env:
+      PROJECT_ID: plcocina-apps
+      RUNTIME_SERVICE_ACCOUNT: portal-admin-api@plcocina-apps.iam.gserviceaccount.com
+      HOSTING_DEPLOY_SERVICE_ACCOUNT: github-firebase-deploy@plcocina-apps.iam.gserviceaccount.com
+      FUNCTIONS_DEPLOY_SERVICE_ACCOUNT: ${{ vars.FUNCTIONS_DEPLOY_SERVICE_ACCOUNT }}
+      WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate deployment identity configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$FUNCTIONS_DEPLOY_SERVICE_ACCOUNT"
+          test -n "$WORKLOAD_IDENTITY_PROVIDER"
+          test "$FUNCTIONS_DEPLOY_SERVICE_ACCOUNT" != "$HOSTING_DEPLOY_SERVICE_ACCOUNT"
+          test "$FUNCTIONS_DEPLOY_SERVICE_ACCOUNT" != "$RUNTIME_SERVICE_ACCOUNT"
+          case "$FUNCTIONS_DEPLOY_SERVICE_ACCOUNT" in
+            *@"$PROJECT_ID".iam.gserviceaccount.com) ;;
+            *) echo "La identidad de despliegue no pertenece a $PROJECT_ID" >&2; exit 1 ;;
+          esac
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Set up Java for Firebase Emulator Suite
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install backend dependencies
+        run: npm --prefix functions ci
+
+      - name: Build backend
+        run: npm run functions:build
+
+      - name: Run unit and static tests
+        run: |
+          npm run functions:test
+          npm run check
+
+      - name: Install Firebase CLI
+        run: npm install --global firebase-tools@15.33.0
+
+      - name: Run Firestore rules tests in Emulator Suite
+        run: npm run functions:test:emulator
+
+      - name: Authenticate with the dedicated deployment identity
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.FUNCTIONS_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.PROJECT_ID }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Deploy only the admin-api codebase
+        run: firebase deploy --only functions:admin-api --project "$PROJECT_ID" --non-interactive

@@ -1,5 +1,7 @@
 export const PROJECT_ID = "plcocina-apps";
 export const REGION = "us-central1";
+export const RUNTIME_SERVICE_ACCOUNT =
+  "portal-admin-api@plcocina-apps.iam.gserviceaccount.com";
 export const ADMIN_API_VERSION = "2A";
 
 const PRODUCTION_ORIGINS = ["https://apps.plcocina.com"];

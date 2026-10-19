@@ -8,4 +8,5 @@ firebase-debug.*.log
 *firebase-adminsdk*.json
 *service-account*.json
 application_default_credentials.json
+gha-creds-*.json
 npm-debug.log*

@@ -16,7 +16,8 @@ const requiredFiles = [
   "firestore.rules",
   "firestore.indexes.json",
   "docs/backend-iam.md",
-  "docs/backend-development.md"
+  "docs/backend-development.md",
+  ".github/workflows/firebase-functions-deploy.yml"
 ];
 
 for (const path of requiredFiles) {
@@ -35,6 +36,44 @@ if (firebase.functions?.runtime !== "nodejs22") throw new Error("Functions debe 
 const workflow = await readFile(".github/workflows/firebase-deploy.yml", "utf8");
 if (!workflow.includes("firebase deploy --only hosting:portal --project plcocina-apps")) {
   throw new Error("El workflow debe conservar el despliegue exclusivo hosting:portal");
+}
+
+const functionsWorkflow = await readFile(
+  ".github/workflows/firebase-functions-deploy.yml",
+  "utf8"
+);
+const functionIndex = await readFile("functions/src/index.ts", "utf8");
+const functionConfig = await readFile("functions/src/config.ts", "utf8");
+if (!functionsWorkflow.includes("workflow_dispatch:")) {
+  throw new Error("El workflow de Functions debe ser exclusivamente manual");
+}
+if (/\n\s*push:/.test(functionsWorkflow)) {
+  throw new Error("Un push no debe desplegar Functions automáticamente");
+}
+if (!functionsWorkflow.includes("inputs.confirmation == 'DEPLOY'")) {
+  throw new Error("Falta la confirmación explícita del despliegue de Functions");
+}
+if (!functionsWorkflow.includes("firebase deploy --only functions:admin-api")) {
+  throw new Error("El workflow debe desplegar exclusivamente el codebase admin-api");
+}
+if (!functionsWorkflow.includes("FUNCTIONS_DEPLOY_SERVICE_ACCOUNT")) {
+  throw new Error("Falta una identidad dedicada para desplegar Functions");
+}
+if (!functionsWorkflow.includes('!= "$HOSTING_DEPLOY_SERVICE_ACCOUNT"')) {
+  throw new Error("El workflow debe rechazar la identidad de despliegue de Hosting");
+}
+if (!functionsWorkflow.includes('!= "$RUNTIME_SERVICE_ACCOUNT"')) {
+  throw new Error("El workflow debe separar las identidades de despliegue y runtime");
+}
+if (!functionIndex.includes("serviceAccount: RUNTIME_SERVICE_ACCOUNT")) {
+  throw new Error("adminApi debe declarar explícitamente su identidad de runtime");
+}
+if (
+  !functionConfig.includes(
+    '"portal-admin-api@plcocina-apps.iam.gserviceaccount.com"'
+  )
+) {
+  throw new Error("La identidad de runtime de adminApi no es la aprobada");
 }
 
 const firestoreRules = await readFile("firestore.rules", "utf8");

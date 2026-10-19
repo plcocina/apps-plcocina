@@ -2,7 +2,11 @@ import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { onRequest } from "firebase-functions/v2/https";
 import { createAdminApp } from "./app.js";
-import { allowedOrigins, REGION } from "./config.js";
+import {
+  allowedOrigins,
+  REGION,
+  RUNTIME_SERVICE_ACCOUNT
+} from "./config.js";
 
 initializeApp();
 
@@ -14,6 +18,7 @@ const app = createAdminApp({
 export const adminApi = onRequest(
   {
     region: REGION,
+    serviceAccount: RUNTIME_SERVICE_ACCOUNT,
     minInstances: 0,
     maxInstances: 10,
     timeoutSeconds: 30,
