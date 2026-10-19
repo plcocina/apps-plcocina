@@ -35,6 +35,8 @@ if (!publicIndex.includes('href="/admin"')) {
 const adminHtml = await readFile("public/admin/index.html", "utf8");
 const adminJs = await readFile("public/assets/admin-auth.js", "utf8");
 const clientConfig = await readFile("public/assets/firebase-client-config.js", "utf8");
+const bootstrap = await readFile("scripts/bootstrap-super-admin.mjs", "utf8");
+const bootstrapDocs = await readFile("docs/super-admin-bootstrap.md", "utf8");
 
 if (/createUserWithEmailAndPassword|signUp/i.test(adminHtml + adminJs)) {
   throw new Error("El frontend no debe incluir registro de usuarios");
@@ -47,6 +49,24 @@ if (!adminJs.includes("browserSessionPersistence")) {
 }
 if (!clientConfig.includes('projectId: "plcocina-apps"')) {
   throw new Error("La configuración cliente debe apuntar a plcocina-apps");
+}
+if (!bootstrap.includes("getUserByEmail(EXPECTED_EMAIL)")) {
+  throw new Error("El bootstrap debe contrastar el correo fijo mediante getUserByEmail");
+}
+if (/providerData|passwordHash|passwordSalt/.test(bootstrap)) {
+  throw new Error("El bootstrap no debe inferir el acceso por providerData ni leer hashes");
+}
+for (const permission of [
+  "firebaseauth.users.get",
+  "firebaseauth.users.list",
+  "firebaseauth.users.update"
+]) {
+  if (!bootstrapDocs.includes(permission)) {
+    throw new Error(`Falta documentar el permiso mínimo ${permission}`);
+  }
+}
+if (!bootstrapDocs.includes("read -r -p 'UID validado: ' EXPECTED_SUPER_ADMIN_UID")) {
+  throw new Error("Los ejemplos del bootstrap deben ser compatibles con Bash");
 }
 
 console.log("Estructura y controles estáticos verificados.");

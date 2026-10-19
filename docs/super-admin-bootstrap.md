@@ -8,8 +8,13 @@ Este procedimiento corresponde exclusivamente al proyecto Firebase `plcocina-app
 2. Validarlo por un segundo canal o una segunda persona autorizada.
 3. Usar Cloud Shell o una estación administrativa controlada con MFA.
 4. Autenticarse con Application Default Credentials o impersonación sin claves JSON.
-5. Confirmar que la identidad ejecutora sólo tenga temporalmente `firebaseauth.users.get` y `firebaseauth.users.update`.
+5. Confirmar que la identidad ejecutora sólo tenga temporalmente estos permisos mínimos:
+   - `firebaseauth.users.get`, para resolver la cuenta por UID y por correo.
+   - `firebaseauth.users.list`, para comprobar que ninguna otra cuenta tenga `super_admin: true`.
+   - `firebaseauth.users.update`, para asignar el Custom Claim únicamente en modo `--apply`.
 6. No guardar el UID en archivos, historial compartido, CI ni GitHub Actions.
+
+El script identifica la cuenta mediante las operaciones documentadas `getUser(uid)` y `getUserByEmail(email)` y exige que ambas búsquedas produzcan el mismo UID. No depende de `providerData` y no solicita `firebaseauth.configs.getHashConfig` ni acceso a hashes de contraseñas.
 
 ## Inspección sin cambios
 
@@ -17,20 +22,20 @@ Instalar exactamente las dependencias bloqueadas y ejecutar el modo predetermina
 
 ```bash
 npm ci
-read -r "EXPECTED_SUPER_ADMIN_UID?UID validado: "
+read -r -p 'UID validado: ' EXPECTED_SUPER_ADMIN_UID
 export EXPECTED_SUPER_ADMIN_UID
 npm run super-admin:check
 unset EXPECTED_SUPER_ADMIN_UID
 ```
 
-La inspección falla de forma segura si el UID no corresponde a `hector@plcocina.com`, la cuenta está deshabilitada, no usa contraseña o existe otro usuario con `super_admin: true`.
+La inspección falla de forma segura si el UID y `hector@plcocina.com` no resuelven a la misma cuenta, la cuenta está deshabilitada o existe otro usuario con `super_admin: true`.
 
 ## Asignación explícita
 
 Ejecutar solamente después de revisar la salida de inspección:
 
 ```bash
-read -r "EXPECTED_SUPER_ADMIN_UID?UID validado: "
+read -r -p 'UID validado: ' EXPECTED_SUPER_ADMIN_UID
 export EXPECTED_SUPER_ADMIN_UID
 export CONFIRM_SUPER_ADMIN='assign:hector@plcocina.com'
 npm run super-admin:apply

@@ -30,21 +30,18 @@ async function run({ expectedUid, apply: shouldApply }) {
   const app = initializeApp({ credential: applicationDefault(), projectId: PROJECT_ID });
   const auth = getAuth(app);
   const target = await auth.getUser(expectedUid);
+  const targetByEmail = await auth.getUserByEmail(EXPECTED_EMAIL);
 
   if (target.email?.toLowerCase() !== EXPECTED_EMAIL) {
     throw new Error("El UID indicado no corresponde a la cuenta inicial aprobada.");
   }
 
-  if (target.disabled) {
-    throw new Error("La cuenta inicial está deshabilitada.");
+  if (targetByEmail.uid !== expectedUid) {
+    throw new Error("El correo inicial aprobado no corresponde al UID indicado.");
   }
 
-  const hasPasswordProvider = target.providerData.some(
-    ({ providerId }) => providerId === "password"
-  );
-
-  if (!hasPasswordProvider) {
-    throw new Error("La cuenta inicial no tiene habilitado el proveedor de contraseña.");
+  if (target.disabled) {
+    throw new Error("La cuenta inicial está deshabilitada.");
   }
 
   const existingSuperAdmins = await listSuperAdmins(auth);
@@ -64,7 +61,7 @@ async function run({ expectedUid, apply: shouldApply }) {
     uid: target.uid,
     email: target.email,
     disabled: target.disabled,
-    passwordProvider: hasPasswordProvider,
+    emailLookupMatchesUid: targetByEmail.uid === expectedUid,
     superAdminAlreadyAssigned: alreadyAssigned,
     otherSuperAdmins: unexpectedSuperAdmins.length
   }, null, 2));
