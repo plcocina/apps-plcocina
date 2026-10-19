@@ -8,7 +8,15 @@ const requiredFiles = [
   "public/assets/admin-auth.js",
   "public/assets/firebase-client-config.js",
   "scripts/bootstrap-super-admin.mjs",
-  "docs/super-admin-bootstrap.md"
+  "docs/super-admin-bootstrap.md",
+  "functions/package.json",
+  "functions/package-lock.json",
+  "functions/src/index.ts",
+  "functions/src/app.ts",
+  "firestore.rules",
+  "firestore.indexes.json",
+  "docs/backend-iam.md",
+  "docs/backend-development.md"
 ];
 
 for (const path of requiredFiles) {
@@ -19,6 +27,28 @@ for (const path of requiredFiles) {
 const firebase = JSON.parse(await readFile("firebase.json", "utf8"));
 if (firebase.hosting?.target !== "portal") throw new Error("Hosting debe usar target portal");
 if (firebase.hosting?.public !== "public") throw new Error("Hosting sólo debe publicar public/");
+if (firebase.hosting?.rewrites) throw new Error("No se deben publicar rewrites antes de desplegar el backend");
+if (firebase.functions?.source !== "functions") throw new Error("Functions debe usar functions/");
+if (firebase.functions?.codebase !== "admin-api") throw new Error("Functions debe usar el codebase admin-api");
+if (firebase.functions?.runtime !== "nodejs22") throw new Error("Functions debe usar Node.js 22");
+
+const workflow = await readFile(".github/workflows/firebase-deploy.yml", "utf8");
+if (!workflow.includes("firebase deploy --only hosting:portal --project plcocina-apps")) {
+  throw new Error("El workflow debe conservar el despliegue exclusivo hosting:portal");
+}
+
+const firestoreRules = await readFile("firestore.rules", "utf8");
+for (const collection of [
+  "users",
+  "applications",
+  "accessGrants",
+  "invitations",
+  "auditEvents"
+]) {
+  if (!firestoreRules.includes(`match /${collection}/{document=**}`)) {
+    throw new Error(`Falta la regla de denegación para ${collection}`);
+  }
+}
 
 const publicIndex = await readFile("public/index.html", "utf8");
 if (!publicIndex.includes("family=Inter")) throw new Error("La portada debe conservar Inter");
