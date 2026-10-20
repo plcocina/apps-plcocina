@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Portal público y acceso privado de APPS PL COCINA.",
   "scripts": {
-    "check": "node --check public/assets/firebase-client-config.js && node --check public/assets/admin-auth.js && node --check scripts/bootstrap-super-admin.mjs && node --check scripts/diagnose-github-oidc.mjs && node test/validate-structure.mjs",
+    "check": "node --check public/assets/firebase-client-config.js && node --check public/assets/admin-auth.js && node --check scripts/bootstrap-super-admin.mjs && node test/validate-structure.mjs",
     "functions:build": "npm --prefix functions run build",
     "functions:test": "npm --prefix functions test",
     "functions:test:emulator": "firebase emulators:exec --project demo-plcocina-apps --only firestore \"npm --prefix functions run test:rules\"",
