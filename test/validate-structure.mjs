@@ -8,6 +8,7 @@ const requiredFiles = [
   "public/assets/admin-auth.js",
   "public/assets/firebase-client-config.js",
   "scripts/bootstrap-super-admin.mjs",
+  "scripts/diagnose-github-oidc.mjs",
   "docs/super-admin-bootstrap.md",
   "functions/package.json",
   "functions/package-lock.json",
@@ -44,6 +45,7 @@ const functionsWorkflow = await readFile(
 );
 const functionIndex = await readFile("functions/src/index.ts", "utf8");
 const functionConfig = await readFile("functions/src/config.ts", "utf8");
+const oidcDiagnostic = await readFile("scripts/diagnose-github-oidc.mjs", "utf8");
 if (!functionsWorkflow.includes("workflow_dispatch:")) {
   throw new Error("El workflow de Functions debe ser exclusivamente manual");
 }
@@ -71,6 +73,9 @@ if (!functionsWorkflow.includes("gcloud auth application-default print-access-to
 const unitTestsPosition = functionsWorkflow.indexOf("npm run functions:test");
 const emulatorTestsPosition = functionsWorkflow.indexOf("npm run functions:test:emulator");
 const authPosition = functionsWorkflow.indexOf("google-github-actions/auth@v3");
+const oidcDiagnosticPosition = functionsWorkflow.indexOf(
+  "node scripts/diagnose-github-oidc.mjs"
+);
 const setupGcloudPosition = functionsWorkflow.indexOf("google-github-actions/setup-gcloud@v3");
 const adcCheckPosition = functionsWorkflow.indexOf(
   "gcloud auth application-default print-access-token >/dev/null"
@@ -84,7 +89,8 @@ const firebaseAdcCheckPosition = functionsWorkflow.indexOf(
 if (
   unitTestsPosition < 0 ||
   emulatorTestsPosition < unitTestsPosition ||
-  authPosition < emulatorTestsPosition ||
+  oidcDiagnosticPosition < emulatorTestsPosition ||
+  authPosition < oidcDiagnosticPosition ||
   setupGcloudPosition < authPosition ||
   adcCheckPosition < setupGcloudPosition ||
   firebaseAdcCheckPosition < adcCheckPosition ||
@@ -93,6 +99,28 @@ if (
   throw new Error(
     "El orden debe ser pruebas, WIF, setup-gcloud, ADC, preflight de Firebase y despliegue"
   );
+}
+if (
+  !functionsWorkflow.includes(
+    "EXPECTED_OIDC_SUBJECT: repo:plcocina/apps-plcocina:environment:admin-api-production"
+  )
+) {
+  throw new Error("El diagnóstico debe comparar el subject autorizado exactamente");
+}
+for (const claim of ["sub", "repository", "ref", "environment"]) {
+  if (!oidcDiagnostic.includes(`"${claim}"`)) {
+    throw new Error(`El diagnóstico OIDC debe incluir ${claim}`);
+  }
+}
+for (const forbidden of [
+  "console.log(jwt)",
+  "console.log(requestToken)",
+  "process.stdout.write(jwt)",
+  "process.stdout.write(requestToken)"
+]) {
+  if (oidcDiagnostic.includes(forbidden)) {
+    throw new Error("El diagnóstico OIDC no debe imprimir tokens");
+  }
 }
 if (!functionsWorkflow.includes('!= "$HOSTING_DEPLOY_SERVICE_ACCOUNT"')) {
   throw new Error("El workflow debe rechazar la identidad de despliegue de Hosting");

@@ -75,6 +75,14 @@ jobs:
       - name: Run Firestore rules tests in Emulator Suite
         run: npm run functions:test:emulator
 
+      - name: Diagnose GitHub OIDC claims safely
+        env:
+          EXPECTED_OIDC_SUBJECT: repo:plcocina/apps-plcocina:environment:admin-api-production
+          EXPECTED_OIDC_REPOSITORY: plcocina/apps-plcocina
+          EXPECTED_OIDC_REF: refs/heads/main
+          EXPECTED_OIDC_ENVIRONMENT: admin-api-production
+        run: node scripts/diagnose-github-oidc.mjs
+
       - name: Authenticate with the dedicated deployment identity
         uses: google-github-actions/auth@v3
         with:
