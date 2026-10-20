@@ -49,9 +49,12 @@ firebase emulators:start --project demo-plcocina-apps --only auth,functions,fire
 - Workflow independiente `.github/workflows/firebase-functions-deploy.yml`.
 - Disparo exclusivamente manual, confirmación literal `DEPLOY` y environment `admin-api-production`.
 - Pruebas unitarias, estáticas y de reglas antes de autenticar o desplegar.
+- Validación de las credenciales ADC federadas mediante Google Cloud SDK antes de invocar Firebase CLI.
 - Despliegue limitado a `firebase deploy --only functions:admin-api`.
 
 El archivo temporal `gha-creds-*.json` creado por la acción oficial de autenticación contiene configuración federada de corta duración, no una clave privada de cuenta de servicio; está ignorado por Git y la acción lo elimina al finalizar.
+
+Firebase CLI detecta ADC mediante `GOOGLE_APPLICATION_CREDENTIALS`; no requiere `firebase login`, `FIREBASE_TOKEN` ni un archivo de clave privada. Después de `auth@v3`, el workflow configura `setup-gcloud@v3` y comprueba tanto la existencia del archivo temporal como el intercambio por un access token, redirigiendo el token a `/dev/null`. A continuación ejecuta `firebase functions:list` como preflight de sólo lectura para verificar que Firebase CLI también puede consumir ADC. Si alguna comprobación falla, el despliegue no comienza.
 
 ## Configuración administrativa pendiente
 

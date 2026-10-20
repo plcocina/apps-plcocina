@@ -84,5 +84,22 @@ jobs:
           create_credentials_file: true
           export_environment_variables: true
 
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Verify federated Application Default Credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GOOGLE_APPLICATION_CREDENTIALS:-}"
+          test -f "$GOOGLE_APPLICATION_CREDENTIALS"
+          gcloud auth application-default print-access-token >/dev/null
+          echo "Federated Application Default Credentials are available"
+
+      - name: Verify Firebase CLI can consume ADC
+        run: firebase functions:list --project "$PROJECT_ID" --json >/dev/null
+
       - name: Deploy only the admin-api codebase
         run: firebase deploy --only functions:admin-api --project "$PROJECT_ID" --non-interactive

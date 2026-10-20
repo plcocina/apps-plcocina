@@ -59,6 +59,41 @@ if (!functionsWorkflow.includes("firebase deploy --only functions:admin-api")) {
 if (!functionsWorkflow.includes("FUNCTIONS_DEPLOY_SERVICE_ACCOUNT")) {
   throw new Error("Falta una identidad dedicada para desplegar Functions");
 }
+if (!functionsWorkflow.includes("google-github-actions/setup-gcloud@v3")) {
+  throw new Error("El workflow debe configurar gcloud después de WIF");
+}
+if (!functionsWorkflow.includes('test -f "$GOOGLE_APPLICATION_CREDENTIALS"')) {
+  throw new Error("El workflow debe comprobar el archivo temporal de ADC");
+}
+if (!functionsWorkflow.includes("gcloud auth application-default print-access-token >/dev/null")) {
+  throw new Error("El workflow debe validar ADC sin imprimir el access token");
+}
+const unitTestsPosition = functionsWorkflow.indexOf("npm run functions:test");
+const emulatorTestsPosition = functionsWorkflow.indexOf("npm run functions:test:emulator");
+const authPosition = functionsWorkflow.indexOf("google-github-actions/auth@v3");
+const setupGcloudPosition = functionsWorkflow.indexOf("google-github-actions/setup-gcloud@v3");
+const adcCheckPosition = functionsWorkflow.indexOf(
+  "gcloud auth application-default print-access-token >/dev/null"
+);
+const deployPosition = functionsWorkflow.indexOf(
+  "firebase deploy --only functions:admin-api"
+);
+const firebaseAdcCheckPosition = functionsWorkflow.indexOf(
+  'firebase functions:list --project "$PROJECT_ID" --json >/dev/null'
+);
+if (
+  unitTestsPosition < 0 ||
+  emulatorTestsPosition < unitTestsPosition ||
+  authPosition < emulatorTestsPosition ||
+  setupGcloudPosition < authPosition ||
+  adcCheckPosition < setupGcloudPosition ||
+  firebaseAdcCheckPosition < adcCheckPosition ||
+  deployPosition < firebaseAdcCheckPosition
+) {
+  throw new Error(
+    "El orden debe ser pruebas, WIF, setup-gcloud, ADC, preflight de Firebase y despliegue"
+  );
+}
 if (!functionsWorkflow.includes('!= "$HOSTING_DEPLOY_SERVICE_ACCOUNT"')) {
   throw new Error("El workflow debe rechazar la identidad de despliegue de Hosting");
 }
