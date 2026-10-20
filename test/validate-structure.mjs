@@ -76,6 +76,9 @@ const authPosition = functionsWorkflow.indexOf("google-github-actions/auth@v3");
 const oidcDiagnosticPosition = functionsWorkflow.indexOf(
   "node scripts/diagnose-github-oidc.mjs"
 );
+const diagnosticStopPosition = functionsWorkflow.indexOf(
+  "Stop after temporary OIDC diagnosis"
+);
 const setupGcloudPosition = functionsWorkflow.indexOf("google-github-actions/setup-gcloud@v3");
 const adcCheckPosition = functionsWorkflow.indexOf(
   "gcloud auth application-default print-access-token >/dev/null"
@@ -90,7 +93,8 @@ if (
   unitTestsPosition < 0 ||
   emulatorTestsPosition < unitTestsPosition ||
   oidcDiagnosticPosition < emulatorTestsPosition ||
-  authPosition < oidcDiagnosticPosition ||
+  diagnosticStopPosition < oidcDiagnosticPosition ||
+  authPosition < diagnosticStopPosition ||
   setupGcloudPosition < authPosition ||
   adcCheckPosition < setupGcloudPosition ||
   firebaseAdcCheckPosition < adcCheckPosition ||
@@ -99,6 +103,9 @@ if (
   throw new Error(
     "El orden debe ser pruebas, WIF, setup-gcloud, ADC, preflight de Firebase y despliegue"
   );
+}
+if (!functionsWorkflow.includes("Stop after temporary OIDC diagnosis\n        run: exit 1")) {
+  throw new Error("El diagnóstico temporal debe detenerse antes de autenticar");
 }
 if (
   !functionsWorkflow.includes(
