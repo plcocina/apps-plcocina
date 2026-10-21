@@ -9,6 +9,8 @@ const requiredFiles = [
   "public/assets/admin-auth.js",
   "public/assets/firebase-client-config.js",
   "scripts/bootstrap-super-admin.mjs",
+  "scripts/validate-admin-api-manifest.mjs",
+  "scripts/validate-admin-api-deployment.mjs",
   "docs/super-admin-bootstrap.md",
   "functions/package.json",
   "functions/package-lock.json",
@@ -43,6 +45,10 @@ const functionsWorkflow = await readFile(
   ".github/workflows/firebase-functions-deploy.yml",
   "utf8"
 );
+const deploymentChecks = await readFile(
+  "scripts/validate-admin-api-deployment.mjs",
+  "utf8"
+);
 const functionIndex = await readFile("functions/src/index.ts", "utf8");
 const functionConfig = await readFile("functions/src/config.ts", "utf8");
 if (!functionsWorkflow.includes("workflow_dispatch:")) {
@@ -56,6 +62,32 @@ if (!functionsWorkflow.includes("inputs.confirmation == 'DEPLOY'")) {
 }
 if (!functionsWorkflow.includes("firebase deploy --only functions:admin-api")) {
   throw new Error("El workflow debe desplegar exclusivamente el codebase admin-api");
+}
+if (!functionsWorkflow.includes("firebase-tools@15.33.0")) {
+  throw new Error("El workflow debe fijar Firebase CLI 15.33.0");
+}
+if (!functionsWorkflow.includes("node scripts/validate-admin-api-manifest.mjs")) {
+  throw new Error("El workflow debe validar el manifiesto generado antes del despliegue");
+}
+if ((functionsWorkflow.match(/validate-admin-api-deployment\.mjs cloud-state/g) ?? []).length !== 2) {
+  throw new Error("El workflow debe validar el estado cloud antes y después del despliegue");
+}
+if ((functionsWorkflow.match(/validate-admin-api-deployment\.mjs anonymous-health/g) ?? []).length !== 2) {
+  throw new Error("El workflow debe comprobar el health anónimo antes y después del despliegue");
+}
+if (!deploymentChecks.includes("service.invokerIamDisabled !== true")) {
+  throw new Error("La validación debe usar el campo efectivo invokerIamDisabled de Cloud Run v2");
+}
+if (/get-iam-policy|set-iam-policy|add-iam-policy-binding|remove-iam-policy-binding/.test(functionsWorkflow)) {
+  throw new Error("El workflow no debe consultar ni modificar políticas IAM");
+}
+if (
+  /gcloud\s+(?:run services update|functions deploy|artifacts repositories update)/.test(
+    functionsWorkflow
+  ) ||
+  /functions:artifacts:setpolicy/.test(functionsWorkflow)
+) {
+  throw new Error("Los preflight y postflight no deben modificar infraestructura");
 }
 if (!functionsWorkflow.includes("FUNCTIONS_DEPLOY_SERVICE_ACCOUNT")) {
   throw new Error("Falta una identidad dedicada para desplegar Functions");
@@ -103,6 +135,9 @@ if (!functionsWorkflow.includes('!= "$RUNTIME_SERVICE_ACCOUNT"')) {
 }
 if (!functionIndex.includes("serviceAccount: RUNTIME_SERVICE_ACCOUNT")) {
   throw new Error("adminApi debe declarar explícitamente su identidad de runtime");
+}
+if (/invoker\s*:/.test(functionIndex)) {
+  throw new Error("adminApi no debe declarar invoker en el código fuente");
 }
 if (
   !functionConfig.includes(

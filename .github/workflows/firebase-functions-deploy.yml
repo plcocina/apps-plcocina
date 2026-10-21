@@ -24,6 +24,10 @@ jobs:
     environment: admin-api-production
     env:
       PROJECT_ID: plcocina-apps
+      REGION: us-central1
+      FUNCTION_NAME: adminApi
+      RUN_SERVICE: adminapi
+      ARTIFACT_REPOSITORY: gcf-artifacts
       RUNTIME_SERVICE_ACCOUNT: portal-admin-api@plcocina-apps.iam.gserviceaccount.com
       HOSTING_DEPLOY_SERVICE_ACCOUNT: github-firebase-deploy@plcocina-apps.iam.gserviceaccount.com
       FUNCTIONS_DEPLOY_SERVICE_ACCOUNT: ${{ vars.FUNCTIONS_DEPLOY_SERVICE_ACCOUNT }}
@@ -64,6 +68,9 @@ jobs:
       - name: Build backend
         run: npm run functions:build
 
+      - name: Validate generated Functions manifest
+        run: node scripts/validate-admin-api-manifest.mjs
+
       - name: Run unit and static tests
         run: |
           npm run functions:test
@@ -101,5 +108,57 @@ jobs:
       - name: Verify Firebase CLI can consume ADC
         run: firebase functions:list --project "$PROJECT_ID" --json >/dev/null
 
+      - name: Preflight effective adminApi state
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_dir="$(mktemp -d)"
+          trap 'rm -rf "$check_dir"' EXIT
+          gcloud functions describe "$FUNCTION_NAME" \
+            --gen2 \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --format=json >"$check_dir/function.json"
+          gcloud run services describe "$RUN_SERVICE" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --format=json >"$check_dir/run.json"
+          gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
+            --location "$REGION" \
+            --project "$PROJECT_ID" \
+            --format=json >"$check_dir/artifact.json"
+          node scripts/validate-admin-api-deployment.mjs cloud-state \
+            "$check_dir/function.json" \
+            "$check_dir/run.json" \
+            "$check_dir/artifact.json"
+          node scripts/validate-admin-api-deployment.mjs anonymous-health \
+            "$check_dir/function.json"
+
       - name: Deploy only the admin-api codebase
         run: firebase deploy --only functions:admin-api --project "$PROJECT_ID" --non-interactive
+
+      - name: Postflight effective adminApi state
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_dir="$(mktemp -d)"
+          trap 'rm -rf "$check_dir"' EXIT
+          gcloud functions describe "$FUNCTION_NAME" \
+            --gen2 \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --format=json >"$check_dir/function.json"
+          gcloud run services describe "$RUN_SERVICE" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --format=json >"$check_dir/run.json"
+          gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
+            --location "$REGION" \
+            --project "$PROJECT_ID" \
+            --format=json >"$check_dir/artifact.json"
+          node scripts/validate-admin-api-deployment.mjs cloud-state \
+            "$check_dir/function.json" \
+            "$check_dir/run.json" \
+            "$check_dir/artifact.json"
+          node scripts/validate-admin-api-deployment.mjs anonymous-health \
+            "$check_dir/function.json"
