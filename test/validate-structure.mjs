@@ -3,6 +3,8 @@ import { readFile, stat } from "node:fs/promises";
 const requiredFiles = [
   "public/index.html",
   "public/logo_PL-Cocina-icono.png",
+  "public/assets/landing.css",
+  "public/assets/landing.js",
   "public/admin/index.html",
   "public/assets/admin.css",
   "public/assets/admin-api-client.js",
@@ -176,7 +178,27 @@ for (const collection of [
 }
 
 const publicIndex = await readFile("public/index.html", "utf8");
+const landingCss = await readFile("public/assets/landing.css", "utf8");
+const landingJs = await readFile("public/assets/landing.js", "utf8");
 if (!publicIndex.includes("family=Inter")) throw new Error("La portada debe conservar Inter");
+if (!publicIndex.includes('href="/assets/landing.css"')) {
+  throw new Error("La portada debe cargar su CSS externo");
+}
+if (!publicIndex.includes('src="/assets/landing.js"')) {
+  throw new Error("La portada debe cargar su JavaScript externo");
+}
+if (/<style\b|<script(?!\s+src=)|\sstyle\s*=/i.test(publicIndex)) {
+  throw new Error("La portada no debe contener estilos ni scripts inline");
+}
+if (!landingCss.includes("@media(max-width:850px)") || !landingCss.includes("@media(max-width:580px)")) {
+  throw new Error("La portada debe conservar sus puntos de quiebre responsive");
+}
+if (!landingCss.includes("font-family:Inter,Arial,sans-serif")) {
+  throw new Error("El CSS de la portada debe conservar la tipografía Inter");
+}
+if (!landingJs.includes('document.getElementById("year")')) {
+  throw new Error("La portada debe conservar la actualización automática del año");
+}
 if (!publicIndex.includes("https://calculadora-burritos.plcocina.com/")) {
   throw new Error("La portada perdió el enlace a Calculadora de Burritos");
 }
@@ -226,6 +248,9 @@ const csp = firebase.hosting.headers
   .find((header) => header.key === "Content-Security-Policy")?.value;
 if (!csp?.includes("https://adminapi-nnra4xim6q-uc.a.run.app")) {
   throw new Error("La CSP debe permitir exclusivamente el origen HTTPS de adminApi");
+}
+if (/script-src[^;]*'unsafe-(?:inline|eval)'|style-src[^;]*'unsafe-inline'/.test(csp)) {
+  throw new Error("La CSP no debe permitir unsafe-inline ni unsafe-eval");
 }
 if (!bootstrap.includes("getUserByEmail(EXPECTED_EMAIL)")) {
   throw new Error("El bootstrap debe contrastar el correo fijo mediante getUserByEmail");
