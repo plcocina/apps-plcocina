@@ -78,6 +78,21 @@ if ((functionsWorkflow.match(/validate-admin-api-deployment\.mjs anonymous-healt
 if (!deploymentChecks.includes("service.invokerIamDisabled !== true")) {
   throw new Error("La validación debe usar el campo efectivo invokerIamDisabled de Cloud Run v2");
 }
+for (const apiUrl of [
+  "https://cloudfunctions.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/functions/$FUNCTION_NAME",
+  "https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/services/$RUN_SERVICE",
+  "https://artifactregistry.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/repositories/$ARTIFACT_REPOSITORY"
+]) {
+  if ((functionsWorkflow.split(apiUrl).length - 1) !== 2) {
+    throw new Error(`El workflow debe consultar dos veces la API oficial: ${apiUrl}`);
+  }
+}
+if (
+  (functionsWorkflow.match(/fetch_google_json/g) ?? []).length !== 8 ||
+  (functionsWorkflow.match(/fetch-google-json/g) ?? []).length !== 2
+) {
+  throw new Error("El workflow debe usar el lector autenticado para los seis recursos cloud");
+}
 if (/get-iam-policy|set-iam-policy|add-iam-policy-binding|remove-iam-policy-binding/.test(functionsWorkflow)) {
   throw new Error("El workflow no debe consultar ni modificar políticas IAM");
 }

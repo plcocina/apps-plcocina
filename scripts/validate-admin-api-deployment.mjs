@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 export const EXPECTED = Object.freeze({
@@ -12,6 +12,12 @@ export const EXPECTED = Object.freeze({
   cleanupPolicy: "firebase-functions-cleanup",
   cleanupOlderThan: "604800s"
 });
+
+const GOOGLE_API_URLS = new Set([
+  `https://cloudfunctions.googleapis.com/v2/projects/${EXPECTED.projectId}/locations/${EXPECTED.region}/functions/${EXPECTED.functionName}`,
+  `https://run.googleapis.com/v2/projects/${EXPECTED.projectId}/locations/${EXPECTED.region}/services/${EXPECTED.runService}`,
+  `https://artifactregistry.googleapis.com/v1/projects/${EXPECTED.projectId}/locations/${EXPECTED.region}/repositories/${EXPECTED.artifactRepository}`
+]);
 
 function requireObject(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -57,12 +63,25 @@ export function validateRunServiceState(value) {
   if (service.invokerIamDisabled !== true) {
     throw new Error("Cloud Run no confirma invokerIamDisabled=true");
   }
-  if (service.reconciling === true) {
-    throw new Error("El servicio Cloud Run todavía se está reconciliando");
+  if (service.reconciling !== false) {
+    throw new Error("Cloud Run no confirma reconciling=false");
   }
   if (service.terminalCondition?.state !== "CONDITION_SUCCEEDED") {
     throw new Error("El servicio Cloud Run no está listo");
   }
+}
+
+export function validateGoogleApiUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("La URL de Google Cloud no es válida");
+  }
+  if (!GOOGLE_API_URLS.has(url.href)) {
+    throw new Error("La URL solicitada no corresponde a un recurso autorizado de APPS PL COCINA");
+  }
+  return url;
 }
 
 export function validateArtifactRepository(value) {
@@ -73,8 +92,8 @@ export function validateArtifactRepository(value) {
   );
 
   if (repository.name !== expectedName) throw new Error(`No se encontró ${expectedName}`);
-  if (repository.cleanupPolicyDryRun === true) {
-    throw new Error("La política de limpieza está configurada sólo como simulación");
+  if (repository.cleanupPolicyDryRun !== false) {
+    throw new Error("Artifact Registry no confirma cleanupPolicyDryRun=false");
   }
 
   const policy = repository.cleanupPolicies?.[EXPECTED.cleanupPolicy];
@@ -133,10 +152,54 @@ async function readJson(path, label) {
   }
 }
 
+async function readAccessToken() {
+  let token = "";
+  for await (const chunk of process.stdin) token += chunk;
+  token = token.trim();
+  if (!token || /\s/.test(token)) {
+    throw new Error("ADC no proporcionó un access token válido");
+  }
+  return token;
+}
+
+async function fetchGoogleJson(urlValue, outputPath) {
+  const url = validateGoogleApiUrl(urlValue);
+  if (!outputPath) throw new Error("Falta la ruta temporal de salida");
+  const token = await readAccessToken();
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000)
+  });
+  if (!response.ok) {
+    throw new Error(`Google Cloud API devolvió HTTP ${response.status}`);
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error("Google Cloud API no devolvió JSON");
+  }
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error("Google Cloud API devolvió JSON inválido");
+  }
+  requireObject(body, "La respuesta de Google Cloud API");
+  await writeFile(outputPath, `${JSON.stringify(body)}\n`, { mode: 0o600 });
+}
+
 async function main() {
   const [mode, functionPath, runPath, artifactPath] = process.argv.slice(2);
+  if (mode === "fetch-google-json") {
+    await fetchGoogleJson(functionPath, runPath);
+    return;
+  }
   if (!mode || !functionPath) {
-    throw new Error("Uso: cloud-state <function.json> <run.json> <artifact.json> | anonymous-health <function.json>");
+    throw new Error("Uso: fetch-google-json <url> <salida> | cloud-state <function.json> <run.json> <artifact.json> | anonymous-health <function.json>");
   }
 
   const fn = await readJson(functionPath, "la descripción de Cloud Functions");

@@ -114,19 +114,19 @@ jobs:
           set -euo pipefail
           check_dir="$(mktemp -d)"
           trap 'rm -rf "$check_dir"' EXIT
-          gcloud functions describe "$FUNCTION_NAME" \
-            --gen2 \
-            --region "$REGION" \
-            --project "$PROJECT_ID" \
-            --format=json >"$check_dir/function.json"
-          gcloud run services describe "$RUN_SERVICE" \
-            --region "$REGION" \
-            --project "$PROJECT_ID" \
-            --format=json >"$check_dir/run.json"
-          gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
-            --location "$REGION" \
-            --project "$PROJECT_ID" \
-            --format=json >"$check_dir/artifact.json"
+          fetch_google_json() {
+            gcloud auth application-default print-access-token | \
+              node scripts/validate-admin-api-deployment.mjs fetch-google-json "$1" "$2"
+          }
+          fetch_google_json \
+            "https://cloudfunctions.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/functions/$FUNCTION_NAME" \
+            "$check_dir/function.json"
+          fetch_google_json \
+            "https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/services/$RUN_SERVICE" \
+            "$check_dir/run.json"
+          fetch_google_json \
+            "https://artifactregistry.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/repositories/$ARTIFACT_REPOSITORY" \
+            "$check_dir/artifact.json"
           node scripts/validate-admin-api-deployment.mjs cloud-state \
             "$check_dir/function.json" \
             "$check_dir/run.json" \
@@ -143,19 +143,19 @@ jobs:
           set -euo pipefail
           check_dir="$(mktemp -d)"
           trap 'rm -rf "$check_dir"' EXIT
-          gcloud functions describe "$FUNCTION_NAME" \
-            --gen2 \
-            --region "$REGION" \
-            --project "$PROJECT_ID" \
-            --format=json >"$check_dir/function.json"
-          gcloud run services describe "$RUN_SERVICE" \
-            --region "$REGION" \
-            --project "$PROJECT_ID" \
-            --format=json >"$check_dir/run.json"
-          gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
-            --location "$REGION" \
-            --project "$PROJECT_ID" \
-            --format=json >"$check_dir/artifact.json"
+          fetch_google_json() {
+            gcloud auth application-default print-access-token | \
+              node scripts/validate-admin-api-deployment.mjs fetch-google-json "$1" "$2"
+          }
+          fetch_google_json \
+            "https://cloudfunctions.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/functions/$FUNCTION_NAME" \
+            "$check_dir/function.json"
+          fetch_google_json \
+            "https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/services/$RUN_SERVICE" \
+            "$check_dir/run.json"
+          fetch_google_json \
+            "https://artifactregistry.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/repositories/$ARTIFACT_REPOSITORY" \
+            "$check_dir/artifact.json"
           node scripts/validate-admin-api-deployment.mjs cloud-state \
             "$check_dir/function.json" \
             "$check_dir/run.json" \

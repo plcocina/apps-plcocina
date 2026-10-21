@@ -5,6 +5,7 @@ import {
   validateAnonymousHealth,
   validateArtifactRepository,
   validateFunctionState,
+  validateGoogleApiUrl,
   validateRunServiceState
 } from "../scripts/validate-admin-api-deployment.mjs";
 
@@ -23,6 +24,20 @@ const runState = {
   invokerIamDisabled: true,
   reconciling: false,
   terminalCondition: { state: "CONDITION_SUCCEEDED" }
+};
+
+const gcloudRunV1State = {
+  apiVersion: "serving.knative.dev/v1",
+  kind: "Service",
+  metadata: {
+    name: EXPECTED.runService,
+    namespace: "465339579029",
+    labels: { "cloud.googleapis.com/location": EXPECTED.region },
+    annotations: { "run.googleapis.com/invoker-iam-disabled": "true" }
+  },
+  status: {
+    conditions: [{ type: "Ready", status: "True" }]
+  }
 };
 
 const artifactState = {
@@ -59,10 +74,31 @@ test("requires the effective Cloud Run v2 invoker setting and ready state", () =
   assert.throws(() => validateRunServiceState({ ...runState, invokerIamDisabled: false }));
   assert.throws(() => validateRunServiceState({ ...runState, invokerIamDisabled: undefined }));
   assert.throws(() => validateRunServiceState({ ...runState, reconciling: true }));
+  assert.throws(() => validateRunServiceState({ ...runState, reconciling: undefined }));
+  assert.throws(() => validateRunServiceState(gcloudRunV1State));
+});
+
+test("accepts only the three exact read-only Google Cloud API resource URLs", () => {
+  for (const url of [
+    `https://cloudfunctions.googleapis.com/v2/projects/${EXPECTED.projectId}/locations/${EXPECTED.region}/functions/${EXPECTED.functionName}`,
+    `https://run.googleapis.com/v2/projects/${EXPECTED.projectId}/locations/${EXPECTED.region}/services/${EXPECTED.runService}`,
+    `https://artifactregistry.googleapis.com/v1/projects/${EXPECTED.projectId}/locations/${EXPECTED.region}/repositories/${EXPECTED.artifactRepository}`
+  ]) {
+    assert.equal(validateGoogleApiUrl(url).href, url);
+  }
+  for (const invalid of [
+    "http://run.googleapis.com/v2/projects/plcocina-apps/locations/us-central1/services/adminapi",
+    "https://run.googleapis.com/v1/projects/plcocina-apps/locations/us-central1/services/adminapi",
+    "https://run.googleapis.com/v2/projects/otro/locations/us-central1/services/adminapi",
+    "https://example.com/"
+  ]) {
+    assert.throws(() => validateGoogleApiUrl(invalid));
+  }
 });
 
 test("requires an active seven-day DELETE cleanup policy", () => {
   assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicyDryRun: true }));
+  assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicyDryRun: undefined }));
   assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicies: {} }));
   assert.throws(() => validateArtifactRepository({
     ...artifactState,
