@@ -7,6 +7,10 @@ import {
   signInWithEmailAndPassword,
   signOut
 } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-auth.js";
+import {
+  AdminApiError,
+  verifySuperAdminSession
+} from "/assets/admin-api-client.js";
 import { firebaseConfig } from "/assets/firebase-client-config.js";
 
 const EXPECTED_PROJECT_ID = "plcocina-apps";
@@ -28,6 +32,11 @@ const submitButton = document.querySelector("#submit-button");
 const errorMessage = document.querySelector("#auth-error");
 const authorizedEmail = document.querySelector("#authorized-email");
 const signOutButton = document.querySelector("#sign-out-button");
+const loadingContent = loadingView.firstElementChild;
+
+let authorizationRevision = 0;
+let activeVerification = null;
+let signOutMessage = null;
 
 function showOnly(view) {
   for (const element of [loadingView, loginView, authorizedView]) {
@@ -42,38 +51,103 @@ function setFormPending(isPending) {
   submitButton.textContent = isPending ? "Verificando…" : "Iniciar sesión";
 }
 
-function showGenericError() {
-  errorMessage.textContent = "No fue posible autorizar el acceso. Verifica tus datos o contacta al administrador del sistema.";
+function showError(message) {
+  errorMessage.textContent = message;
   errorMessage.hidden = false;
 }
 
-async function hasSuperAdminClaim(user) {
-  const tokenResult = await user.getIdTokenResult(true);
-  return tokenResult.claims.super_admin === true;
+function resetLoadingView() {
+  loadingContent.replaceChildren();
+  const spinner = document.createElement("div");
+  spinner.className = "spinner";
+  spinner.setAttribute("aria-hidden", "true");
+  loadingContent.append(spinner, "Verificando sesión segura…");
 }
 
-async function authorizeOrSignOut(user) {
-  if (!user) {
-    authorizedEmail.textContent = "";
-    showOnly(loginView);
-    return;
-  }
+function showRetry(message) {
+  loadingContent.replaceChildren();
+  const error = document.createElement("p");
+  error.className = "error";
+  error.setAttribute("role", "alert");
+  error.textContent = message;
+  const retryButton = document.createElement("button");
+  retryButton.className = "secondary-button";
+  retryButton.type = "button";
+  retryButton.textContent = "Reintentar verificación";
+  retryButton.addEventListener("click", () => {
+    const user = auth.currentUser;
+    if (user) void authorizeUser(user);
+  }, { once: true });
+  loadingContent.append(error, retryButton);
+  showOnly(loadingView);
+}
+
+function invalidateVerification() {
+  authorizationRevision += 1;
+  activeVerification?.abort();
+  activeVerification = null;
+}
+
+async function authorizeUser(user) {
+  invalidateVerification();
+  const revision = authorizationRevision;
+  const controller = new AbortController();
+  activeVerification = controller;
+  resetLoadingView();
+  showOnly(loadingView);
 
   try {
-    if (!(await hasSuperAdminClaim(user))) {
-      await signOut(auth);
-      showOnly(loginView);
-      showGenericError();
+    const principal = await verifySuperAdminSession(user, {
+      signal: controller.signal
+    });
+    if (
+      revision !== authorizationRevision ||
+      auth.currentUser?.uid !== user.uid
+    ) {
       return;
     }
 
-    authorizedEmail.textContent = user.email ?? "Cuenta autorizada";
+    authorizedEmail.textContent = principal.email ?? user.email ?? "Cuenta autorizada";
     showOnly(authorizedView);
-  } catch {
-    await signOut(auth).catch(() => {});
-    showOnly(loginView);
-    showGenericError();
+  } catch (error) {
+    if (
+      revision !== authorizationRevision ||
+      auth.currentUser?.uid !== user.uid ||
+      error?.name === "AbortError"
+    ) {
+      return;
+    }
+
+    if (error instanceof AdminApiError && (error.status === 401 || error.status === 403)) {
+      signOutMessage = error.message;
+      invalidateVerification();
+      await signOut(auth).catch(() => {});
+      return;
+    }
+
+    const message = error instanceof AdminApiError
+      ? error.message
+      : "No fue posible verificar el acceso. Intenta nuevamente.";
+    showRetry(message);
+  } finally {
+    if (revision === authorizationRevision) activeVerification = null;
   }
+}
+
+function authorizeOrSignOut(user) {
+  if (!user) {
+    invalidateVerification();
+    authorizedEmail.textContent = "";
+    errorMessage.hidden = true;
+    showOnly(loginView);
+    if (signOutMessage) {
+      showError(signOutMessage);
+      signOutMessage = null;
+    }
+    return;
+  }
+
+  void authorizeUser(user);
 }
 
 loginForm.addEventListener("submit", async (event) => {
@@ -83,19 +157,14 @@ loginForm.addEventListener("submit", async (event) => {
 
   try {
     await setPersistence(auth, browserSessionPersistence);
-    const credential = await signInWithEmailAndPassword(
+    await signInWithEmailAndPassword(
       auth,
       emailInput.value.trim(),
       passwordInput.value
     );
-
-    if (!(await hasSuperAdminClaim(credential.user))) {
-      await signOut(auth);
-      showGenericError();
-    }
   } catch {
     await signOut(auth).catch(() => {});
-    showGenericError();
+    showError("No fue posible iniciar sesión. Verifica tus datos e intenta nuevamente.");
   } finally {
     passwordInput.value = "";
     setFormPending(false);
@@ -104,6 +173,7 @@ loginForm.addEventListener("submit", async (event) => {
 
 signOutButton.addEventListener("click", async () => {
   signOutButton.disabled = true;
+  invalidateVerification();
   try {
     await signOut(auth);
   } finally {

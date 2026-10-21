@@ -5,6 +5,7 @@ const requiredFiles = [
   "public/logo_PL-Cocina-icono.png",
   "public/admin/index.html",
   "public/assets/admin.css",
+  "public/assets/admin-api-client.js",
   "public/assets/admin-auth.js",
   "public/assets/firebase-client-config.js",
   "scripts/bootstrap-super-admin.mjs",
@@ -138,6 +139,7 @@ if (!publicIndex.includes('href="/admin"')) {
 
 const adminHtml = await readFile("public/admin/index.html", "utf8");
 const adminJs = await readFile("public/assets/admin-auth.js", "utf8");
+const adminApiClient = await readFile("public/assets/admin-api-client.js", "utf8");
 const clientConfig = await readFile("public/assets/firebase-client-config.js", "utf8");
 const bootstrap = await readFile("scripts/bootstrap-super-admin.mjs", "utf8");
 const bootstrapDocs = await readFile("docs/super-admin-bootstrap.md", "utf8");
@@ -145,14 +147,35 @@ const bootstrapDocs = await readFile("docs/super-admin-bootstrap.md", "utf8");
 if (/createUserWithEmailAndPassword|signUp/i.test(adminHtml + adminJs)) {
   throw new Error("El frontend no debe incluir registro de usuarios");
 }
-if (!adminJs.includes("claims.super_admin === true")) {
-  throw new Error("Falta la comprobación booleana estricta de super_admin");
+if (!adminApiClient.includes("user.getIdToken()")) {
+  throw new Error("El portal debe obtener el Firebase ID token de la sesión actual");
+}
+if (!adminApiClient.includes("Authorization: `Bearer ${idToken}`")) {
+  throw new Error("El ID token debe enviarse exclusivamente como Bearer token");
+}
+if (!adminApiClient.includes("payload?.data?.superAdmin !== true")) {
+  throw new Error("El backend debe confirmar el rol Super Admin");
+}
+if (!adminApiClient.includes('payload.data.uid !== expectedUid')) {
+  throw new Error("El backend debe confirmar el UID exacto de la sesión");
+}
+if (!adminJs.includes("authorizationRevision")) {
+  throw new Error("El portal debe invalidar respuestas de autorización anteriores");
+}
+if (/console\.(log|info|debug|warn|error)/.test(adminJs + adminApiClient)) {
+  throw new Error("El frontend administrativo no debe registrar datos de autenticación");
 }
 if (!adminJs.includes("browserSessionPersistence")) {
   throw new Error("La sesión administrativa debe usar persistencia de sesión");
 }
 if (!clientConfig.includes('projectId: "plcocina-apps"')) {
   throw new Error("La configuración cliente debe apuntar a plcocina-apps");
+}
+const csp = firebase.hosting.headers
+  ?.flatMap((entry) => entry.headers ?? [])
+  .find((header) => header.key === "Content-Security-Policy")?.value;
+if (!csp?.includes("https://adminapi-nnra4xim6q-uc.a.run.app")) {
+  throw new Error("La CSP debe permitir exclusivamente el origen HTTPS de adminApi");
 }
 if (!bootstrap.includes("getUserByEmail(EXPECTED_EMAIL)")) {
   throw new Error("El bootstrap debe contrastar el correo fijo mediante getUserByEmail");
