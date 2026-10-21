@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Portal público y acceso privado de APPS PL COCINA.",
   "scripts": {
-    "check": "node --check public/assets/landing.js && node --check public/assets/firebase-client-config.js && node --check public/assets/admin-api-client.js && node --check public/assets/admin-auth.js && node --check scripts/bootstrap-super-admin.mjs && node --check scripts/validate-admin-api-manifest.mjs && node --check scripts/validate-admin-api-deployment.mjs && node --test test/admin-api-client.test.mjs test/admin-api-deployment-checks.test.mjs && node test/validate-structure.mjs",
+    "check": "node --check public/assets/landing.js && node --check public/assets/firebase-client-config.js && node --check public/assets/admin-api-client.js && node --check public/assets/admin-auth.js && node --check public/assets/admin-applications.js && node --check scripts/bootstrap-super-admin.mjs && node --check scripts/validate-admin-api-manifest.mjs && node --check scripts/validate-admin-api-deployment.mjs && node --test test/admin-api-client.test.mjs test/admin-api-deployment-checks.test.mjs && node test/validate-structure.mjs",
     "functions:build": "npm --prefix functions run build",
     "functions:manifest": "npm run functions:build && node scripts/validate-admin-api-manifest.mjs",
     "functions:test": "npm --prefix functions test",

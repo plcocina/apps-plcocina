@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ADMIN_ME_URL,
+  ADMIN_API_BASE,
   AdminApiError,
+  adminApiRequest,
   verifySuperAdminSession
 } from "../public/assets/admin-api-client.js";
 
@@ -19,6 +21,7 @@ function user() {
 function response(status, body) {
   return {
     status,
+    ok: status >= 200 && status < 300,
     json: async () => body
   };
 }
@@ -97,4 +100,21 @@ test("treats a server error as retryable", async () => {
     }),
     (error) => error.code === "SERVICE_UNAVAILABLE" && error.status === 503
   );
+});
+
+test("sends authenticated application mutations without persisting credentials", async () => {
+  let captured;
+  const data = await adminApiRequest(user(), "/api/admin/applications", {
+    method: "POST",
+    body: { name: "Reportes" },
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response(201, { ok: true, data: { appId: "app-id" } });
+    }
+  });
+  assert.equal(captured.url, `${ADMIN_API_BASE}/api/admin/applications`);
+  assert.equal(captured.options.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.equal(captured.options.credentials, "omit");
+  assert.deepEqual(JSON.parse(captured.options.body), { name: "Reportes" });
+  assert.deepEqual(data, { appId: "app-id" });
 });

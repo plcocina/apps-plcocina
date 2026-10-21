@@ -9,6 +9,7 @@ const requiredFiles = [
   "public/assets/admin.css",
   "public/assets/admin-api-client.js",
   "public/assets/admin-auth.js",
+  "public/assets/admin-applications.js",
   "public/assets/firebase-client-config.js",
   "scripts/bootstrap-super-admin.mjs",
   "scripts/validate-admin-api-manifest.mjs",
@@ -168,6 +169,7 @@ const firestoreRules = await readFile("firestore.rules", "utf8");
 for (const collection of [
   "users",
   "applications",
+  "applicationUniqueKeys",
   "accessGrants",
   "invitations",
   "auditEvents"

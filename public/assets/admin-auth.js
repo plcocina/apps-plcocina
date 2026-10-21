@@ -12,6 +12,7 @@ import {
   verifySuperAdminSession
 } from "/assets/admin-api-client.js";
 import { firebaseConfig } from "/assets/firebase-client-config.js";
+import { initializeApplications } from "/assets/admin-applications.js";
 
 const EXPECTED_PROJECT_ID = "plcocina-apps";
 
@@ -30,8 +31,10 @@ const emailInput = document.querySelector("#email");
 const passwordInput = document.querySelector("#password");
 const submitButton = document.querySelector("#submit-button");
 const errorMessage = document.querySelector("#auth-error");
-const authorizedEmail = document.querySelector("#authorized-email");
-const signOutButton = document.querySelector("#sign-out-button");
+const loginPage = document.querySelector(".page");
+const dashboard = document.querySelector("#admin-dashboard");
+const dashboardEmail = document.querySelector("#dashboard-email");
+const dashboardSignOut = document.querySelector("#dashboard-sign-out");
 const loadingContent = loadingView.firstElementChild;
 
 let authorizationRevision = 0;
@@ -107,8 +110,10 @@ async function authorizeUser(user) {
       return;
     }
 
-    authorizedEmail.textContent = principal.email ?? user.email ?? "Cuenta autorizada";
-    showOnly(authorizedView);
+    dashboardEmail.textContent = principal.email ?? user.email ?? "Cuenta autorizada";
+    loginPage.hidden = true;
+    dashboard.hidden = false;
+    initializeApplications(user);
   } catch (error) {
     if (
       revision !== authorizationRevision ||
@@ -137,7 +142,8 @@ async function authorizeUser(user) {
 function authorizeOrSignOut(user) {
   if (!user) {
     invalidateVerification();
-    authorizedEmail.textContent = "";
+    dashboard.hidden = true;
+    loginPage.hidden = false;
     errorMessage.hidden = true;
     showOnly(loginView);
     if (signOutMessage) {
@@ -171,14 +177,10 @@ loginForm.addEventListener("submit", async (event) => {
   }
 });
 
-signOutButton.addEventListener("click", async () => {
-  signOutButton.disabled = true;
+dashboardSignOut.addEventListener("click", async () => {
+  dashboardSignOut.disabled = true;
   invalidateVerification();
-  try {
-    await signOut(auth);
-  } finally {
-    signOutButton.disabled = false;
-  }
+  try { await signOut(auth); } finally { dashboardSignOut.disabled = false; }
 });
 
 onAuthStateChanged(auth, authorizeOrSignOut);

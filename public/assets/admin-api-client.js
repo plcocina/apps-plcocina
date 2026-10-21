@@ -1,5 +1,6 @@
 export const ADMIN_ME_URL =
   "https://adminapi-nnra4xim6q-uc.a.run.app/api/admin/me";
+export const ADMIN_API_BASE = "https://adminapi-nnra4xim6q-uc.a.run.app";
 
 export class AdminApiError extends Error {
   constructor(code, message, status = null) {
@@ -84,4 +85,33 @@ export async function verifySuperAdminSession(user, options = {}) {
   }
 
   return validatedPrincipal(payload, user.uid);
+}
+
+export async function adminApiRequest(user, path, options = {}) {
+  const token = await user.getIdToken();
+  let response;
+  try {
+    response = await (options.fetchImpl ?? globalThis.fetch)(`${ADMIN_API_BASE}${path}`, {
+      method: options.method ?? "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+        ...(options.body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      cache: "no-store",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      signal: options.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw new AdminApiError("NETWORK_ERROR", "No fue posible contactar al servicio administrativo.");
+  }
+  let payload = null;
+  try { payload = await response.json(); } catch { /* contrato inválido */ }
+  if (!response.ok || payload?.ok !== true) {
+    throw new AdminApiError(payload?.error?.code ?? "SERVICE_UNAVAILABLE", payload?.error?.message ?? "No fue posible completar la solicitud.", response.status);
+  }
+  return payload.data;
 }

@@ -9,7 +9,7 @@ Portal institucional de aplicaciones operativas.
 ## Estructura
 
 - `public/`: único contenido publicado por Firebase Hosting.
-- `public/admin/`: acceso privado para Super Admin; no contiene módulos administrativos.
+- `public/admin/`: acceso privado para Super Admin y módulo de Administración de aplicaciones.
 - `scripts/`: utilidades locales con Firebase Admin SDK. Nunca se publican en Hosting.
 - `docs/`: procedimientos operativos y de seguridad.
 
@@ -26,7 +26,7 @@ Antes de habilitar despliegue automático, crear el sitio Hosting adicional y au
 
 ## Administración y permisos
 
-La portada de `apps.plcocina.com` permanece pública. `/admin` implementa únicamente autenticación y comprobación del Custom Claim `super_admin`; todavía no contiene módulos ni operaciones administrativas.
+La portada de `apps.plcocina.com` permanece pública y conserva sus tarjetas estáticas. `/admin` comprueba el Custom Claim `super_admin` y administra aplicaciones exclusivamente mediante `adminApi`; el navegador no accede directamente a Firestore.
 
 La comprobación del navegador evita mostrar el estado privado a usuarios no autorizados, pero no sustituye la autorización de servidor. Cada operación futura deberá enviar el ID token por HTTPS a un backend que ejecute `verifyIdToken(token, true)` y exija `super_admin === true` antes de procesarla.
 
