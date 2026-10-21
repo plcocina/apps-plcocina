@@ -74,8 +74,21 @@ test("requires the effective Cloud Run v2 invoker setting and ready state", () =
   assert.throws(() => validateRunServiceState({ ...runState, invokerIamDisabled: false }));
   assert.throws(() => validateRunServiceState({ ...runState, invokerIamDisabled: undefined }));
   assert.throws(() => validateRunServiceState({ ...runState, reconciling: true }));
-  assert.throws(() => validateRunServiceState({ ...runState, reconciling: undefined }));
+  assert.throws(() => validateRunServiceState({ ...runState, reconciling: "false" }));
+  assert.throws(() => validateRunServiceState({ ...runState, terminalCondition: undefined }));
+  assert.throws(() => validateRunServiceState({
+    ...runState,
+    terminalCondition: { state: "CONDITION_FAILED" }
+  }));
   assert.throws(() => validateRunServiceState(gcloudRunV1State));
+});
+
+test("accepts omitted ProtoJSON false fields without relaxing critical checks", () => {
+  const { reconciling: _reconciling, ...runWithoutDefaultFalse } = runState;
+  const { cleanupPolicyDryRun: _dryRun, ...artifactWithoutDefaultFalse } = artifactState;
+
+  assert.equal(validateRunServiceState(runWithoutDefaultFalse), undefined);
+  assert.equal(validateArtifactRepository(artifactWithoutDefaultFalse), undefined);
 });
 
 test("accepts only the three exact read-only Google Cloud API resource URLs", () => {
@@ -98,7 +111,7 @@ test("accepts only the three exact read-only Google Cloud API resource URLs", ()
 
 test("requires an active seven-day DELETE cleanup policy", () => {
   assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicyDryRun: true }));
-  assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicyDryRun: undefined }));
+  assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicyDryRun: "false" }));
   assert.throws(() => validateArtifactRepository({ ...artifactState, cleanupPolicies: {} }));
   assert.throws(() => validateArtifactRepository({
     ...artifactState,

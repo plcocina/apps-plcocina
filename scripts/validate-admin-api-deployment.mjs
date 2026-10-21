@@ -63,8 +63,8 @@ export function validateRunServiceState(value) {
   if (service.invokerIamDisabled !== true) {
     throw new Error("Cloud Run no confirma invokerIamDisabled=true");
   }
-  if (service.reconciling !== false) {
-    throw new Error("Cloud Run no confirma reconciling=false");
+  if (service.reconciling !== undefined && service.reconciling !== false) {
+    throw new Error("Cloud Run indica un estado de reconciliación incompatible");
   }
   if (service.terminalCondition?.state !== "CONDITION_SUCCEEDED") {
     throw new Error("El servicio Cloud Run no está listo");
@@ -92,8 +92,11 @@ export function validateArtifactRepository(value) {
   );
 
   if (repository.name !== expectedName) throw new Error(`No se encontró ${expectedName}`);
-  if (repository.cleanupPolicyDryRun !== false) {
-    throw new Error("Artifact Registry no confirma cleanupPolicyDryRun=false");
+  if (
+    repository.cleanupPolicyDryRun !== undefined &&
+    repository.cleanupPolicyDryRun !== false
+  ) {
+    throw new Error("Artifact Registry indica un estado cleanupPolicyDryRun incompatible");
   }
 
   const policy = repository.cleanupPolicies?.[EXPECTED.cleanupPolicy];
