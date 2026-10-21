@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { createAdminApp } from "./app.js";
 import {
@@ -12,7 +13,8 @@ initializeApp();
 
 const app = createAdminApp({
   verifyIdToken: (token, checkRevoked) => getAuth().verifyIdToken(token, checkRevoked),
-  origins: allowedOrigins()
+  origins: allowedOrigins(),
+  firestore: getFirestore()
 });
 
 export const adminApi = onRequest(

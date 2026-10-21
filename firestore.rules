@@ -13,6 +13,10 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /applicationUniqueKeys/{document=**} {
+      allow read, write: if false;
+    }
+
     match /accessGrants/{document=**} {
       allow read, write: if false;
     }

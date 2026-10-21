@@ -78,6 +78,18 @@ describe("admin API authentication", () => {
     expect(response.body.error.code).toBe("ADMIN_REQUIRED");
   });
 
+  it("does not allow a common user to list applications", async () => {
+    const verifier = vi.fn().mockResolvedValue(token({ super_admin: false }));
+    const { app } = testApp(verifier);
+    const response = await request(app)
+      .get("/api/admin/applications")
+      .set("Origin", ORIGIN)
+      .set("Authorization", "Bearer common-user-token");
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("ADMIN_REQUIRED");
+  });
+
   it.each([
     ["auth/argument-error", "TOKEN_INVALID"],
     ["auth/id-token-expired", "TOKEN_EXPIRED"],

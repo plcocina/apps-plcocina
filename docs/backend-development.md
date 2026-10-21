@@ -1,13 +1,15 @@
 # Desarrollo y operación del backend administrativo
 
-## Alcance de Fase 2B
+## Alcance de Fase 3 — Administración de aplicaciones
 
-La función `adminApi` contiene únicamente:
+La función `adminApi` conserva:
 
 - `GET /api/admin/health`
 - `GET /api/admin/me`
 
-Ambos endpoints requieren un ID token no revocado y el Custom Claim booleano `super_admin === true`. No existen endpoints para crear usuarios, aplicaciones o permisos.
+También expone endpoints CRUD y acciones de estado bajo `/api/admin/applications`. Todos requieren un ID token no revocado y el Custom Claim booleano `super_admin === true`. Las aplicaciones, sus reservas de unicidad y sus eventos de auditoría se escriben con Firebase Admin SDK dentro de transacciones. No existen endpoints para administrar usuarios, invitaciones o permisos.
+
+`GET /api/catalog/applications` queda preparado para devolver únicamente aplicaciones activas y públicas. La portada no lo consume todavía.
 
 ## Requisitos locales
 

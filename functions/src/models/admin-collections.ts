@@ -33,18 +33,32 @@ export const userDocumentSchema = z.object({
 });
 
 export const applicationDocumentSchema = z.object({
+  appId: documentIdSchema,
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
   name: z.string().trim().min(1).max(120),
+  normalizedName: z.string().min(1).max(120),
   description: z.string().trim().max(500),
+  category: z.string().trim().min(1).max(80),
+  normalizedCategory: z.string().min(1).max(80),
   launchUrl: httpsUrlSchema,
-  status: z.enum(["draft", "active", "disabled", "archived"]),
-  accessMode: z.enum(["public", "restricted"]),
-  iconKey: z.string().trim().min(1).max(64),
+  normalizedLaunchUrl: httpsUrlSchema,
+  status: z.enum(["draft", "active", "inactive", "archived"]),
+  accessLevel: z.enum(["public", "private"]),
+  iconKey: z.string().trim().min(1).max(64).nullable(),
   displayOrder: z.number().int().min(0).max(10000),
   createdAt: timestampSchema,
   createdBy: uidSchema,
   updatedAt: timestampSchema,
   updatedBy: uidSchema,
+  revision: z.number().int().positive(),
+  version: z.literal(1)
+}).strict();
+
+export const applicationUniqueKeyDocumentSchema = z.object({
+  kind: z.enum(["slug", "url", "categoryName"]),
+  value: z.string().min(1).max(2048),
+  appId: documentIdSchema,
+  createdAt: timestampSchema,
   version: z.literal(1)
 }).strict();
 
@@ -116,6 +130,7 @@ export const auditEventDocumentSchema = z.object({
 
 export type UserDocument = z.infer<typeof userDocumentSchema>;
 export type ApplicationDocument = z.infer<typeof applicationDocumentSchema>;
+export type ApplicationUniqueKeyDocument = z.infer<typeof applicationUniqueKeyDocumentSchema>;
 export type AccessGrantDocument = z.infer<typeof accessGrantDocumentSchema>;
 export type InvitationDocument = z.infer<typeof invitationDocumentSchema>;
 export type AuditEventDocument = z.infer<typeof auditEventDocumentSchema>;

@@ -12,6 +12,7 @@ const PROJECT_ID = "demo-plcocina-apps";
 const COLLECTIONS = [
   "users",
   "applications",
+  "applicationUniqueKeys",
   "accessGrants",
   "invitations",
   "auditEvents"
