@@ -1,4 +1,5 @@
 import type { DecodedIdToken } from "firebase-admin/auth";
+import type { Firestore } from "firebase-admin/firestore";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { createAdminApp } from "../src/app.js";
@@ -166,5 +167,48 @@ describe("admin API transport controls", () => {
       error: { code: "METHOD_NOT_ALLOWED" }
     });
     expect(verifier).not.toHaveBeenCalled();
+  });
+});
+
+describe("public application catalog", () => {
+  it("returns only active public applications, sorted and without administrative fields", async () => {
+    const records = [
+      { appId: "private", slug: "private", name: "Privada", normalizedName: "privada", description: "", category: "Admin", normalizedCategory: "admin", launchUrl: "https://private.example.com/", normalizedLaunchUrl: "https://private.example.com/", status: "active", accessLevel: "private", iconKey: null, displayOrder: 0, revision: 1 },
+      { appId: "draft", slug: "draft", name: "Borrador", normalizedName: "borrador", description: "", category: "Admin", normalizedCategory: "admin", launchUrl: "https://draft.example.com/", normalizedLaunchUrl: "https://draft.example.com/", status: "draft", accessLevel: "public", iconKey: null, displayOrder: 1, revision: 1 },
+      { appId: "burritos", slug: "calculadora-burritos", name: "Calculadora de Burritos", normalizedName: "calculadora de burritos", description: "Calcula ingredientes.", category: "Producción", normalizedCategory: "produccion", launchUrl: "https://calculadora-burritos.plcocina.com/", normalizedLaunchUrl: "https://calculadora-burritos.plcocina.com/", status: "active", accessLevel: "public", iconKey: "burrito", displayOrder: 20, revision: 4 },
+      { appId: "reports", slug: "reportes-mensuales-2026", name: "Reportes Mensuales 2026", normalizedName: "reportes mensuales 2026", description: "Consulta indicadores.", category: "Reportes", normalizedCategory: "reportes", launchUrl: "https://reportes-mensuales-2026.plcocina.com/", normalizedLaunchUrl: "https://reportes-mensuales-2026.plcocina.com/", status: "active", accessLevel: "public", iconKey: "reports", displayOrder: 10, revision: 3 },
+      { appId: "inactive", slug: "inactive", name: "Inactiva", normalizedName: "inactiva", description: "", category: "Admin", normalizedCategory: "admin", launchUrl: "https://inactive.example.com/", normalizedLaunchUrl: "https://inactive.example.com/", status: "inactive", accessLevel: "public", iconKey: null, displayOrder: 2, revision: 1 },
+      { appId: "archived", slug: "archived", name: "Archivada", normalizedName: "archivada", description: "", category: "Admin", normalizedCategory: "admin", launchUrl: "https://archived.example.com/", normalizedLaunchUrl: "https://archived.example.com/", status: "archived", accessLevel: "public", iconKey: null, displayOrder: 3, revision: 1 }
+    ];
+    const firestore = {
+      collection: () => ({
+        orderBy: () => ({
+          limit: () => ({
+            get: async () => ({ docs: records.map((record) => ({ data: () => record })) })
+          })
+        })
+      })
+    } as unknown as Firestore;
+    const app = createAdminApp({ verifyIdToken: vi.fn(), origins: new Set([ORIGIN]), firestore });
+    const response = await request(app).get("/api/catalog/applications").set("Origin", ORIGIN);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((application: { name: string }) => application.name)).toEqual([
+      "Reportes Mensuales 2026",
+      "Calculadora de Burritos"
+    ]);
+    expect(response.body.data[0]).toEqual({
+      appId: "reports",
+      slug: "reportes-mensuales-2026",
+      name: "Reportes Mensuales 2026",
+      description: "Consulta indicadores.",
+      category: "Reportes",
+      launchUrl: "https://reportes-mensuales-2026.plcocina.com/",
+      iconKey: "reports",
+      displayOrder: 10
+    });
+    expect(response.body.data[0]).not.toHaveProperty("revision");
+    expect(response.body.data[0]).not.toHaveProperty("accessLevel");
+    expect(response.body.data[0]).not.toHaveProperty("status");
   });
 });

@@ -189,7 +189,7 @@ if (!publicIndex.includes('href="/assets/landing.css"')) {
 if (!publicIndex.includes('src="/assets/landing.js"')) {
   throw new Error("La portada debe cargar su JavaScript externo");
 }
-if (/<style\b|<script(?!\s+src=)|\sstyle\s*=/i.test(publicIndex)) {
+if (/<style\b|<script\b(?![^>]*\bsrc=)|\sstyle\s*=/i.test(publicIndex)) {
   throw new Error("La portada no debe contener estilos ni scripts inline");
 }
 if (!landingCss.includes("@media(max-width:850px)") || !landingCss.includes("@media(max-width:580px)")) {
@@ -201,11 +201,14 @@ if (!landingCss.includes("font-family:Inter,Arial,sans-serif")) {
 if (!landingJs.includes('document.getElementById("year")')) {
   throw new Error("La portada debe conservar la actualización automática del año");
 }
-if (!publicIndex.includes("https://calculadora-burritos.plcocina.com/")) {
-  throw new Error("La portada perdió el enlace a Calculadora de Burritos");
+if (!publicIndex.includes('id="catalog-grid"') || !publicIndex.includes('id="application-count"')) {
+  throw new Error("La portada debe incluir los destinos del catálogo dinámico");
 }
-if (!publicIndex.includes("https://reportes-mensuales-2026.plcocina.com/")) {
-  throw new Error("La portada perdió el enlace a Reportes Mensuales 2026");
+if (!landingJs.includes("/api/catalog/applications")) {
+  throw new Error("La portada debe consumir el endpoint público del catálogo");
+}
+if (/innerHTML/.test(landingJs)) {
+  throw new Error("El catálogo no debe insertar datos externos mediante innerHTML");
 }
 if (!publicIndex.includes('href="/admin"')) {
   throw new Error("La portada perdió el acceso a /admin");
