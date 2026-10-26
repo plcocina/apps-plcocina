@@ -127,6 +127,33 @@ export const invitationResponseSchema = z.object({
   requestId: requestIdSchema
 }).strict();
 
+const administrativeInvitationSchema = z.object({
+  invitationId: z.string().uuid(),
+  email: z.string().email(),
+  displayName: z.string().min(1).max(160),
+  status: z.enum(["provisioning", "pending_delivery", "active", "accepting", "password_set", "accepted", "expired", "revoked", "reconciliation_required"]),
+  deliveryStatus: z.enum(["pending", "accepted", "delivered", "delayed", "bounced", "complained", "failed", "unknown"]),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+  acceptedAt: z.string().datetime().nullable(),
+  revision: z.number().int().positive()
+}).strict();
+
+export const invitationsListResponseSchema = z.object({
+  ok: z.literal(true),
+  data: z.object({
+    invitations: z.array(administrativeInvitationSchema),
+    nextPageToken: z.string().nullable()
+  }).strict(),
+  requestId: requestIdSchema
+}).strict();
+
+export const invitationDetailResponseSchema = z.object({
+  ok: z.literal(true),
+  data: administrativeInvitationSchema,
+  requestId: requestIdSchema
+}).strict();
+
 export const invitationValidationResponseSchema = z.object({
   ok: z.literal(true),
   data: z.object({ valid: z.literal(true), expiresAt: z.string().datetime() }).strict(),

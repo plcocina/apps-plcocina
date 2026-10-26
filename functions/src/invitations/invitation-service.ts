@@ -371,7 +371,7 @@ export class InvitationService {
     principal: AdminPrincipal;
     requestId: string;
   }): Promise<InvitationResult> {
-    this.assertConfigured(input.principal);
+    this.assertRevocationConfigured(input.principal);
     const invitationId = this.parseInvitationId(input.invitationId);
     const key = this.parseIdempotencyKey(input.idempotencyKey);
     const parsed = revokeInvitationSchema.safeParse(input.body);
@@ -543,6 +543,11 @@ export class InvitationService {
 
   private assertConfigured(principal: AdminPrincipal) {
     if (!this.tokens || !this.emailProvider.configured || !this.protectedUid) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de invitaciones no está configurado de forma segura.");
+    if (!principal.email) throw new ApiError(403, "ADMIN_REQUIRED", "La cuenta administrativa requiere un correo válido.");
+  }
+
+  private assertRevocationConfigured(principal: AdminPrincipal) {
+    if (!this.protectedUid) throw new ApiError(503, "INTERNAL_ERROR", "El control seguro de invitaciones no está configurado.");
     if (!principal.email) throw new ApiError(403, "ADMIN_REQUIRED", "La cuenta administrativa requiere un correo válido.");
   }
 

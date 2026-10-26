@@ -4,7 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AdminPrincipal } from "../src/auth/require-super-admin.js";
-import { SimulatedInvitationEmailProvider } from "../src/invitations/invitation-email-provider.js";
+import { DisabledInvitationEmailProvider, SimulatedInvitationEmailProvider, type InvitationEmailProvider } from "../src/invitations/invitation-email-provider.js";
 import { InvitationService } from "../src/invitations/invitation-service.js";
 import { InvitationAcceptanceService } from "../src/invitations/invitation-acceptance-service.js";
 import { InvitationTokenKeyring } from "../src/invitations/invitation-token.js";
@@ -302,6 +302,44 @@ describe("C3 invitation lifecycle with emulators", () => {
     expect(invitation.data()).toMatchObject({ status: "revoked", token: null, revokeReason: "Acceso ya no requerido" });
     expect(authUser.disabled).toBe(true);
     expect(profile.data()).toMatchObject({ status: "disabled", invitationStatus: "revoked" });
+  });
+
+  it("keeps create and resend closed but revokes safely without an email provider", async () => {
+    const configured = setup();
+    const email = `provider-disabled-${randomUUID()}@example.net`;
+    const created = await create(configured.service, email);
+    const originalToken = configured.provider.deliveries[0]!.message.token;
+    const disabled = new InvitationService(directory, db, null, new DisabledInvitationEmailProvider(), "protected-super-admin", () => Timestamp.now());
+
+    await expect(create(disabled, `blocked-${randomUUID()}@example.net`)).rejects.toMatchObject({ code: "INTERNAL_ERROR", status: 503 });
+    await expect(resend(disabled, created.invitationId, created.revision)).rejects.toMatchObject({ code: "INTERNAL_ERROR", status: 503 });
+
+    const key = randomUUID();
+    const first = await revoke(disabled, created.invitationId, created.revision, key);
+    const second = await revoke(disabled, created.invitationId, created.revision, key);
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({ status: "revoked" });
+    const [invitation, authUser, profile, audit] = await Promise.all([
+      db.collection("invitations").doc(created.invitationId).get(),
+      getAuth(firebaseApp).getUser(created.uid),
+      db.collection("users").doc(created.uid).get(),
+      db.collection("auditEvents").where("resourceId", "==", created.invitationId).get()
+    ]);
+    expect(invitation.data()).toMatchObject({ status: "revoked", token: null, revokeReason: "Acceso ya no requerido" });
+    expect(authUser.disabled).toBe(true);
+    expect(profile.data()).toMatchObject({ status: "disabled", invitationStatus: "revoked" });
+    expect(audit.docs.some((doc) => doc.data().action === "invitation.revoked" && doc.data().result === "success")).toBe(true);
+    await expect(configured.acceptance.validate({ invitationId: created.invitationId, token: originalToken }, randomUUID())).rejects.toMatchObject({ code: "INVITATION_INVALID" });
+  });
+
+  it("never calls an interrupted email provider while revoking", async () => {
+    const configured = setup();
+    const created = await create(configured.service, `provider-interruption-${randomUUID()}@example.net`);
+    const send = vi.fn().mockRejectedValue(new Error("SIMULATED_PROVIDER_OUTAGE"));
+    const interruptedProvider: InvitationEmailProvider = { name: "simulated", configured: true, send };
+    const service = new InvitationService(directory, db, null, interruptedProvider, "protected-super-admin", () => Timestamp.now());
+    await expect(revoke(service, created.invitationId, created.revision)).resolves.toMatchObject({ status: "revoked" });
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("keeps the token invalidated while recovering an Auth failure during revocation", async () => {

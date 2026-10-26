@@ -108,6 +108,22 @@ describe("admin API authentication", () => {
     expect(verifier).toHaveBeenCalledWith("common-user-token", true);
   });
 
+  it("requires authentication and Super Admin authorization for invitation queries", async () => {
+    const unauthenticated = testApp();
+    const missing = await request(unauthenticated.app).get("/api/admin/invitations").set("Origin", ORIGIN);
+    expect(missing.status).toBe(401);
+    expect(unauthenticated.verifier).not.toHaveBeenCalled();
+
+    const verifier = vi.fn().mockResolvedValue(token({ super_admin: false }));
+    const unauthorized = testApp(verifier);
+    const forbidden = await request(unauthorized.app)
+      .get("/api/admin/invitations")
+      .set("Origin", ORIGIN)
+      .set("Authorization", "Bearer common-user-token");
+    expect(forbidden.status).toBe(403);
+    expect(verifier).toHaveBeenCalledWith("common-user-token", true);
+  });
+
   it("rejects a revoked token before consulting the user directory", async () => {
     const verifier = vi.fn().mockRejectedValue(authError("auth/id-token-revoked"));
     const { app } = testApp(verifier);

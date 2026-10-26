@@ -5,7 +5,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { ApplicationService, publicApplication } from "./applications/application-service.js";
 import { requireSuperAdmin, type AdminRequest, type VerifyIdToken } from "./auth/require-super-admin.js";
 import { ADMIN_API_VERSION, REGION } from "./config.js";
-import { healthResponseSchema, invitationResponseSchema, meResponseSchema, userResponseSchema, usersListResponseSchema } from "./http/contracts.js";
+import { healthResponseSchema, invitationDetailResponseSchema, invitationResponseSchema, invitationsListResponseSchema, meResponseSchema, userResponseSchema, usersListResponseSchema } from "./http/contracts.js";
 import { ApiError, errorHandler } from "./http/errors.js";
 import { requestContext, requestIdFrom } from "./http/request-context.js";
 import { requireHttps, restrictedCors, securityHeaders } from "./http/security.js";
@@ -20,6 +20,7 @@ import { requireAuthenticatedUser, type AuthenticatedRequest } from "./auth/requ
 import { invitationConfirmationResponseSchema, invitationValidationResponseSchema, passwordEstablishmentResponseSchema } from "./http/contracts.js";
 import { ResendWebhookService } from "./invitations/resend-webhook-service.js";
 import type { WebhookReplayStore } from "./invitations/resend-invitation-email-provider.js";
+import { InvitationQueryService } from "./invitations/invitation-query-service.js";
 
 export type AdminApiDependencies = {
   verifyIdToken: VerifyIdToken;
@@ -67,6 +68,7 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
       dependencies.protectedSuperAdminUid ?? null
     )
     : null;
+  const invitationQueries = dependencies.firestore ? new InvitationQueryService(dependencies.firestore, now) : null;
   const invitationAcceptance = dependencies.firestore && dependencies.userDirectory
     ? new InvitationAcceptanceService(
       dependencies.userDirectory, dependencies.firestore, dependencies.invitationTokens ?? null,
@@ -98,6 +100,11 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
   function invitationService(): InvitationService {
     if (!invitations) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de invitaciones no está disponible.");
     return invitations;
+  }
+
+  function invitationQueryService(): InvitationQueryService {
+    if (!invitationQueries) throw new ApiError(503, "INTERNAL_ERROR", "La consulta de invitaciones no está disponible.");
+    return invitationQueries;
   }
 
   function invitationAcceptanceService(): InvitationAcceptanceService {
@@ -224,6 +231,26 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     });
   }
 
+  app.get("/api/admin/invitations", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const input: { pageSize?: string; pageToken?: string; email?: string } = {};
+      if (typeof request.query.pageSize === "string") input.pageSize = request.query.pageSize;
+      if (typeof request.query.pageToken === "string") input.pageToken = request.query.pageToken;
+      if (typeof request.query.email === "string") input.email = request.query.email;
+      const data = await invitationQueryService().list(input);
+      response.status(200).json(invitationsListResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/admin/invitations/:invitationId", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const data = await invitationQueryService().get(routeParam(request.params.invitationId));
+      response.status(200).json(invitationDetailResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/admin/invitations", authenticate, async (request: AdminRequest, response, next) => {
     try {
       const data = await invitationService().create({
@@ -316,7 +343,7 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     } catch (error) { next(error); }
   });
 
-  app.all(["/api/admin/applications", "/api/admin/applications/:appId", "/api/admin/applications/:appId/:action", "/api/admin/users", "/api/admin/users/:uid", "/api/admin/users/:uid/:action", "/api/admin/invitations", "/api/admin/invitations/:invitationId/:action"], (_request, _response, next) => {
+  app.all(["/api/admin/applications", "/api/admin/applications/:appId", "/api/admin/applications/:appId/:action", "/api/admin/users", "/api/admin/users/:uid", "/api/admin/users/:uid/:action", "/api/admin/invitations", "/api/admin/invitations/:invitationId", "/api/admin/invitations/:invitationId/:action"], (_request, _response, next) => {
     next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
   });
 
