@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import type { ErrorCode } from "./contracts.js";
-import { sendError } from "./errors.js";
+import { ApiError, sendError } from "./errors.js";
 import { requestIdFrom } from "./request-context.js";
 
 export function securityHeaders(
@@ -47,6 +47,16 @@ export function restrictedCors(origins: ReadonlySet<string>) {
 
     next();
   };
+}
+
+export function requireHttps(request: Request, _response: Response, next: NextFunction): void {
+  const local = process.env.NODE_ENV === "test" || process.env.FUNCTIONS_EMULATOR === "true";
+  const forwardedProtocol = request.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  if (!local && !request.secure && forwardedProtocol !== "https") {
+    next(new ApiError(400, "VALIDATION_ERROR", "La solicitud debe utilizar HTTPS."));
+    return;
+  }
+  next();
 }
 
 export function authErrorContract(code: string | undefined): {

@@ -2,7 +2,12 @@ export const PROJECT_ID = "plcocina-apps";
 export const REGION = "us-central1";
 export const RUNTIME_SERVICE_ACCOUNT =
   "portal-admin-api@plcocina-apps.iam.gserviceaccount.com";
-export const ADMIN_API_VERSION = "2A";
+export const ADMIN_API_VERSION = "2C-C7";
+
+export function protectedSuperAdminUid(): string | null {
+  const value = process.env.PROTECTED_SUPER_ADMIN_UID?.trim();
+  return value && /^[^/]{1,128}$/.test(value) ? value : null;
+}
 
 const PRODUCTION_ORIGINS = ["https://apps.plcocina.com"];
 const EMULATOR_ORIGINS = [

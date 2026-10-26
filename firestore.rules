@@ -25,7 +25,23 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /invitationUniqueKeys/{document=**} {
+      allow read, write: if false;
+    }
+
     match /auditEvents/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /adminOperations/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /invitationRateLimits/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /webhookReplayEvents/{document=**} {
       allow read, write: if false;
     }
 

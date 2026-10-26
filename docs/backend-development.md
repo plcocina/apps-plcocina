@@ -1,15 +1,23 @@
 # Desarrollo y operación del backend administrativo
 
-## Alcance de Fase 3 — Administración de aplicaciones
+## Alcance actual — Aplicaciones y control de usuarios
 
 La función `adminApi` conserva:
 
 - `GET /api/admin/health`
 - `GET /api/admin/me`
 
-También expone endpoints CRUD y acciones de estado bajo `/api/admin/applications`. Todos requieren un ID token no revocado y el Custom Claim booleano `super_admin === true`. Las aplicaciones, sus reservas de unicidad y sus eventos de auditoría se escriben con Firebase Admin SDK dentro de transacciones. No existen endpoints para administrar usuarios, invitaciones o permisos.
+También expone endpoints CRUD y acciones de estado bajo `/api/admin/applications`. Todos requieren un ID token no revocado y el Custom Claim booleano `super_admin === true`. Las aplicaciones, sus reservas de unicidad y sus eventos de auditoría se escriben con Firebase Admin SDK dentro de transacciones.
 
-`GET /api/catalog/applications` queda preparado para devolver únicamente aplicaciones activas y públicas. La portada no lo consume todavía.
+La Etapa A del Módulo 2 añade consultas de sólo lectura bajo `/api/admin/users`. Combinan Firebase Authentication y `users/{uid}`, admiten paginación y correo exacto, detectan perfiles faltantes o huérfanos y nunca reparan datos automáticamente.
+
+La Etapa B añade `POST /api/admin/users/:uid/suspend`, `reactivate` y `revoke-sessions`. Exigen `expectedRevision`; suspensión y revocación exigen motivo; todas exigen `Idempotency-Key` UUID. Las operaciones se coordinan en `adminOperations`, serializan cada perfil mediante `pendingOperationId` y registran eventos append-only. No existen endpoints de eliminación, cambio de claims ni permisos por aplicación.
+
+Las Etapas C1/C2 añaden el provisionamiento recuperable de cuentas provisionales. C3 añade reenvío, revocación y conciliación de expiraciones. C4 añade `POST /api/invitations/validate`, `POST /api/invitations/establish-password` y `POST /api/invitations/:invitationId/confirm`. Validación y contraseña usan tokens propios, límites transaccionales y respuestas sin datos administrativos; confirmación exige ID token no revocado y coincidencia de UID y correo. La página local `/accept-invitation` implementa el flujo visual de aceptación sin persistir el token ni la contraseña.
+
+El adaptador de Resend y `POST /api/webhooks/resend` están integrados técnicamente en el código local. Ambos permanecen cerrados mientras `RESEND_INVITATIONS_ENABLED` conserve su valor predeterminado `false`. Los parámetros secretos están declarados para una activación futura, pero sus valores no están configurados, no existe un proveedor externo habilitado y ninguna parte del Módulo 2 se ha desplegado a producción.
+
+`GET /api/catalog/applications` devuelve únicamente aplicaciones activas y públicas y es consumido por la portada dinámica.
 
 ## Requisitos locales
 
@@ -47,6 +55,9 @@ firebase emulators:start --project demo-plcocina-apps --only auth,functions,fire
 
 - Runtime Node.js 22 en `us-central1`.
 - Cuenta de runtime fijada a `portal-admin-api@plcocina-apps.iam.gserviceaccount.com`.
+- UID protegido configurado mediante `PROTECTED_SUPER_ADMIN_UID`; si falta o es inválido, los endpoints mutables responden 503 sin tocar datos.
+- Claves de invitación inyectables y versionadas; los valores reales de Secret Manager no están configurados y los endpoints públicos fallan cerrados si no hay keyring.
+- Proveedor simulado únicamente en emuladores y pruebas. El runtime tiene integrado el adaptador Resend, pero permanece deshabilitado por defecto mediante `RESEND_INVITATIONS_ENABLED=false`.
 - Codebase `admin-api`, sin rewrites de Hosting.
 - Workflow independiente `.github/workflows/firebase-functions-deploy.yml`.
 - Disparo exclusivamente manual, confirmación literal `DEPLOY` y environment `admin-api-production`.
@@ -71,6 +82,7 @@ Antes del primer despliegue se debe:
 7. Confirmar la política de invocación HTTPS antes del primer despliegue. CORS y la autenticación de aplicación no reemplazan IAM de invocación.
 8. Revisar las reglas Firestore existentes. Este workflow no despliega reglas ni índices.
 9. Desplegar primero la función y sólo después considerar un rewrite de Hosting en otra fase.
+10. Obtener aprobación y agregar únicamente `firebaseauth.users.update` al runtime antes de publicar Etapa B.
 
 ## Primer despliegue futuro
 

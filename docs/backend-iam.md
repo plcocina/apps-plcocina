@@ -14,21 +14,32 @@ No se crearán claves privadas JSON. `adminApi` declara explícitamente la cuent
 
 ## Runtime: permisos actuales
 
-Los endpoints de Fase 2A sólo verifican tokens y revocación. La cuenta de runtime necesita:
+Verificado en Google Cloud IAM el 22 de octubre de 2026. La cuenta runtime tiene asignados directamente:
 
-- `firebaseauth.users.get`: requerido por la comprobación de usuario y revocación del Admin SDK.
-- `logging.logEntries.create`, normalmente mediante `roles/logging.logWriter`.
+- El rol personalizado `projects/plcocina-apps/roles/portalAdminAuthReader`, que contiene exclusivamente `firebaseauth.users.get`.
+- `roles/datastore.user` para el acceso servidor a Firestore utilizado por aplicaciones y perfiles administrativos.
 
-No necesita todavía crear, listar, actualizar o eliminar usuarios, ni leer o escribir Firestore.
+`firebaseauth.users.get` permite obtener y listar usuarios, además de la comprobación de revocación del Admin SDK. La Etapa A de usuarios no necesita crear, actualizar o eliminar usuarios ni enviar correo, por lo que no requiere cambios IAM.
+
+## Etapas B–C7: permisos faltantes, pendientes de aprobación
+
+La cuenta runtime **no tiene** `firebaseauth.users.update`. Este permiso es necesario para ejecutar `updateUser` durante suspensión, reactivación, establecimiento de contraseña y cierre seguro de estados ambiguos, además de `revokeRefreshTokens(uid)`.
+
+No se modificó IAM. Antes de publicar Etapa B, un administrador deberá agregar exclusivamente `firebaseauth.users.update` al rol personalizado `portalAdminAuthReader` (o a un rol runtime igualmente acotado) y volver a verificar sus permisos efectivos. No se requieren `firebaseauth.users.create`, `firebaseauth.users.delete`, `firebaseauth.users.sendEmail` ni permisos para modificar Custom Claims.
+
+El provisionamiento de cuentas provisionales mediante `createUser` requiere adicionalmente `firebaseauth.users.create`. La implementación local usa exclusivamente Auth Emulator y no modifica IAM.
+
+El proveedor candidato es Resend, por lo que no se necesita `firebaseauth.users.sendEmail`. El adaptador externo permanece deshabilitado. C7 declara tres parámetros Gen 2 sin crear sus valores: `RESEND_API_KEY`, `RESEND_WEBHOOK_SIGNING_SECRET` e `INVITATION_TOKEN_KEY_V1`.
+
+Cuando se autorice la activación, la cuenta runtime deberá recibir `roles/secretmanager.secretAccessor` por separado y únicamente sobre cada uno de esos tres secretos. No se concederá el rol sobre el proyecto completo. La cuenta de despliegue necesitará capacidad para asociar las versiones aprobadas a la función, pero no para leer sus valores.
 
 ## Runtime: permisos previstos para las siguientes etapas
 
 Agregar únicamente cuando existan endpoints que los usen:
 
-- `firebaseauth.users.list`
-- `firebaseauth.users.create`
-- `firebaseauth.users.update`
-- `firebaseauth.users.sendEmail`, si el flujo de invitación elegido lo requiere
+- `firebaseauth.users.create` (Etapa C2; identificado como faltante y pendiente de aprobación)
+- `firebaseauth.users.update` (Etapa B; identificado como faltante y pendiente de aprobación)
+- `firebaseauth.users.sendEmail` no se requiere para la arquitectura aprobada con proveedor transaccional
 - acceso de lectura/escritura a documentos Firestore; inicialmente puede evaluarse `roles/datastore.user`, aunque se prefiere un rol personalizado después de medir las operaciones reales
 - `roles/secretmanager.secretAccessor` sólo sobre el secreto concreto del proveedor de correo
 
