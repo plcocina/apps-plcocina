@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --config vitest.config.ts",
     "test:rules": "vitest run --config vitest.rules.config.ts",
+    "test:emulators": "vitest run --config vitest.emulators.config.ts",
     "test:all": "npm run build && npm test"
   },
   "dependencies": {

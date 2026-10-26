@@ -1,0 +1,39 @@
+{
+  "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json", "firebase.emulators.json", "**/.*", "**/node_modules/**"],
+    "cleanUrls": true,
+    "trailingSlash": false,
+    "headers": [
+      {
+        "source": "**",
+        "headers": [
+          { "key": "Content-Security-Policy", "value": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' https://www.gstatic.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://127.0.0.1:5001 http://localhost:5001 http://127.0.0.1:9099 http://localhost:9099 https://www.gstatic.com; frame-src 'none'" },
+          { "key": "Referrer-Policy", "value": "no-referrer" },
+          { "key": "X-Content-Type-Options", "value": "nosniff" },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=(), usb=()" }
+        ]
+      },
+      {
+        "source": "/accept-invitation{,/**}",
+        "headers": [{ "key": "Cache-Control", "value": "no-store, max-age=0" }]
+      }
+    ]
+  },
+  "functions": {
+    "source": "functions",
+    "codebase": "admin-api",
+    "runtime": "nodejs22",
+    "ignore": ["node_modules", ".git", "firebase-debug.log", "firebase-debug.*.log", "*.local"]
+  },
+  "firestore": { "rules": "firestore.rules", "indexes": "firestore.indexes.json" },
+  "emulators": {
+    "auth": { "host": "127.0.0.1", "port": 9099 },
+    "functions": { "host": "127.0.0.1", "port": 5001 },
+    "firestore": { "host": "127.0.0.1", "port": 8080 },
+    "hosting": { "host": "127.0.0.1", "port": 5002 },
+    "ui": { "enabled": true, "host": "127.0.0.1", "port": 4000 },
+    "singleProjectMode": true
+  }
+}
