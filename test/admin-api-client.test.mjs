@@ -118,3 +118,18 @@ test("sends authenticated application mutations without persisting credentials",
   assert.deepEqual(JSON.parse(captured.options.body), { name: "Reportes" });
   assert.deepEqual(data, { appId: "app-id" });
 });
+
+test("sends an idempotency key only when an administrative operation provides one", async () => {
+  let captured;
+  await adminApiRequest(user(), "/api/admin/users/user-1/suspend", {
+    method: "POST",
+    idempotencyKey: "11111111-1111-4111-8111-111111111111",
+    body: { expectedRevision: 3, reason: "Incidente confirmado" },
+    fetchImpl: async (_url, options) => {
+      captured = options;
+      return response(200, { ok: true, data: { revision: 4 } });
+    }
+  });
+  assert.equal(captured.headers["Idempotency-Key"], "11111111-1111-4111-8111-111111111111");
+  assert.equal(captured.headers.Authorization, `Bearer ${TOKEN}`);
+});
