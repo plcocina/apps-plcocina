@@ -1,19 +1,27 @@
 name: Deploy APPS PL COCINA Portal
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Escribe DEPLOY para confirmar el despliegue de Hosting"
+        required: true
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: portal-hosting-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy Portal Hosting
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY' }}
     runs-on: ubuntu-latest
+    environment: hosting-production
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

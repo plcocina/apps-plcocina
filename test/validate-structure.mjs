@@ -172,7 +172,10 @@ for (const collection of [
   "applicationUniqueKeys",
   "accessGrants",
   "invitations",
-  "auditEvents"
+  "invitationUniqueKeys",
+  "auditEvents",
+  "adminOperations",
+  "invitationRateLimits"
 ]) {
   if (!firestoreRules.includes(`match /${collection}/{document=**}`)) {
     throw new Error(`Falta la regla de denegación para ${collection}`);

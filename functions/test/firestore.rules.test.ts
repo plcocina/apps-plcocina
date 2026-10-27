@@ -15,7 +15,11 @@ const COLLECTIONS = [
   "applicationUniqueKeys",
   "accessGrants",
   "invitations",
-  "auditEvents"
+  "invitationUniqueKeys",
+  "auditEvents",
+  "adminOperations",
+  "invitationRateLimits",
+  "webhookReplayEvents"
 ];
 
 let environment: RulesTestEnvironment;

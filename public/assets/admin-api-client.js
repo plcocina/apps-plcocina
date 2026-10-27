@@ -96,6 +96,7 @@ export async function adminApiRequest(user, path, options = {}) {
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${token}`,
+        ...(options.idempotencyKey === undefined ? {} : { "Idempotency-Key": options.idempotencyKey }),
         ...(options.body === undefined ? {} : { "Content-Type": "application/json" })
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),

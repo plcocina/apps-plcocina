@@ -13,6 +13,8 @@ import {
 } from "/assets/admin-api-client.js";
 import { firebaseConfig } from "/assets/firebase-client-config.js";
 import { initializeApplications } from "/assets/admin-applications.js";
+import { initializeUsers } from "/assets/admin-users.js";
+import { initializeInvitations } from "/assets/admin-invitations.js";
 
 const EXPECTED_PROJECT_ID = "plcocina-apps";
 
@@ -114,6 +116,20 @@ async function authorizeUser(user) {
     loginPage.hidden = true;
     dashboard.hidden = false;
     initializeApplications(user);
+    initializeUsers(user, {
+      onSessionExpired: async (message) => {
+        signOutMessage = message;
+        invalidateVerification();
+        await signOut(auth).catch(() => {});
+      }
+    });
+    initializeInvitations(user, {
+      onSessionExpired: async (message) => {
+        signOutMessage = message;
+        invalidateVerification();
+        await signOut(auth).catch(() => {});
+      }
+    });
   } catch (error) {
     if (
       revision !== authorizationRevision ||

@@ -1,19 +1,37 @@
 import express, { type Response } from "express";
 import type { DecodedIdToken } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 import { ApplicationService, publicApplication } from "./applications/application-service.js";
 import { requireSuperAdmin, type AdminRequest, type VerifyIdToken } from "./auth/require-super-admin.js";
 import { ADMIN_API_VERSION, REGION } from "./config.js";
-import { healthResponseSchema, meResponseSchema } from "./http/contracts.js";
+import { healthResponseSchema, invitationDetailResponseSchema, invitationResponseSchema, invitationsListResponseSchema, meResponseSchema, userResponseSchema, usersListResponseSchema } from "./http/contracts.js";
 import { ApiError, errorHandler } from "./http/errors.js";
 import { requestContext, requestIdFrom } from "./http/request-context.js";
-import { restrictedCors, securityHeaders } from "./http/security.js";
+import { requireHttps, restrictedCors, securityHeaders } from "./http/security.js";
+import { UserQueryService, type UserDirectory } from "./users/user-query-service.js";
+import { UserControlService, type UserControlAction } from "./users/user-control-service.js";
+import { userOperationResponseSchema } from "./http/contracts.js";
+import { InvitationService } from "./invitations/invitation-service.js";
+import { DisabledInvitationEmailProvider, type InvitationEmailProvider } from "./invitations/invitation-email-provider.js";
+import type { InvitationTokenKeyring } from "./invitations/invitation-token.js";
+import { InvitationAcceptanceService } from "./invitations/invitation-acceptance-service.js";
+import { requireAuthenticatedUser, type AuthenticatedRequest } from "./auth/require-authenticated-user.js";
+import { invitationConfirmationResponseSchema, invitationValidationResponseSchema, passwordEstablishmentResponseSchema } from "./http/contracts.js";
+import { ResendWebhookService } from "./invitations/resend-webhook-service.js";
+import type { WebhookReplayStore } from "./invitations/resend-invitation-email-provider.js";
+import { InvitationQueryService } from "./invitations/invitation-query-service.js";
 
 export type AdminApiDependencies = {
   verifyIdToken: VerifyIdToken;
   origins: ReadonlySet<string>;
   now?: () => Date;
   firestore?: Firestore;
+  userDirectory?: UserDirectory;
+  protectedSuperAdminUid?: string | null;
+  invitationTokens?: InvitationTokenKeyring | null;
+  invitationEmailProvider?: InvitationEmailProvider;
+  resendWebhook?: { enabled: boolean; secret?: string; replayStore?: WebhookReplayStore };
 };
 
 function principalFrom(request: AdminRequest) {
@@ -35,11 +53,67 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
   const app = express();
   const now = dependencies.now ?? (() => new Date());
   const authenticate = requireSuperAdmin(dependencies.verifyIdToken);
+  const authenticateUser = requireAuthenticatedUser(dependencies.verifyIdToken);
   const applications = dependencies.firestore ? new ApplicationService(dependencies.firestore) : null;
+  const users = dependencies.firestore && dependencies.userDirectory ? new UserQueryService(dependencies.userDirectory, dependencies.firestore) : null;
+  const userControl = dependencies.firestore && dependencies.userDirectory
+    ? new UserControlService(dependencies.userDirectory, dependencies.firestore, dependencies.protectedSuperAdminUid ?? null)
+    : null;
+  const invitations = dependencies.firestore && dependencies.userDirectory
+    ? new InvitationService(
+      dependencies.userDirectory,
+      dependencies.firestore,
+      dependencies.invitationTokens ?? null,
+      dependencies.invitationEmailProvider ?? new DisabledInvitationEmailProvider(),
+      dependencies.protectedSuperAdminUid ?? null
+    )
+    : null;
+  const invitationQueries = dependencies.firestore ? new InvitationQueryService(dependencies.firestore, now) : null;
+  const invitationAcceptance = dependencies.firestore && dependencies.userDirectory
+    ? new InvitationAcceptanceService(
+      dependencies.userDirectory, dependencies.firestore, dependencies.invitationTokens ?? null,
+      dependencies.protectedSuperAdminUid ?? null, () => Timestamp.fromDate(now())
+    )
+    : null;
+  const resendWebhook = dependencies.resendWebhook?.enabled === true
+    && dependencies.firestore
+    && dependencies.resendWebhook.secret
+    && dependencies.resendWebhook.replayStore
+    ? new ResendWebhookService(dependencies.firestore, dependencies.resendWebhook.replayStore, dependencies.resendWebhook.secret, () => Timestamp.fromDate(now()))
+    : null;
 
   function applicationService(): ApplicationService {
     if (!applications) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de aplicaciones no está disponible.");
     return applications;
+  }
+
+  function userService(): UserQueryService {
+    if (!users) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de usuarios no está disponible.");
+    return users;
+  }
+
+  function userControlService(): UserControlService {
+    if (!userControl) throw new ApiError(503, "INTERNAL_ERROR", "El control de cuentas no está disponible.");
+    return userControl;
+  }
+
+  function invitationService(): InvitationService {
+    if (!invitations) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de invitaciones no está disponible.");
+    return invitations;
+  }
+
+  function invitationQueryService(): InvitationQueryService {
+    if (!invitationQueries) throw new ApiError(503, "INTERNAL_ERROR", "La consulta de invitaciones no está disponible.");
+    return invitationQueries;
+  }
+
+  function invitationAcceptanceService(): InvitationAcceptanceService {
+    if (!invitationAcceptance) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de aceptación no está disponible.");
+    return invitationAcceptance;
+  }
+
+  function sourceIdentifier(request: express.Request) {
+    return `${request.ip ?? "unknown"}|${request.header("user-agent") ?? "unknown"}`;
   }
 
   function appId(value: string): string {
@@ -55,6 +129,32 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
   app.use(requestContext);
   app.use(securityHeaders);
   app.use(restrictedCors(dependencies.origins));
+
+  app.post("/api/webhooks/resend", requireHttps, express.raw({ type: "application/json", limit: "64kb" }), async (request, response, next) => {
+    try {
+      if (!resendWebhook) throw new ApiError(503, "INTERNAL_ERROR", "El receptor de eventos no está habilitado.");
+      if (!Buffer.isBuffer(request.body)) throw new ApiError(400, "VALIDATION_ERROR", "La solicitud no es válida.");
+      const id = request.header("svix-id") ?? "";
+      const timestamp = request.header("svix-timestamp") ?? "";
+      const signature = request.header("svix-signature") ?? "";
+      try {
+        const data = await resendWebhook.receive(request.body, { id, timestamp, signature });
+        response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+      } catch (error) {
+        if (error instanceof Error && error.message === "WEBHOOK_REPLAYED") {
+          response.status(200).json({ ok: true, data: { accepted: true, duplicate: true }, requestId: requestIdFrom(response) });
+          return;
+        }
+        const invalid = error instanceof Error && (
+          error.name === "ZodError"
+          || ["RAW_BODY_REQUIRED", "INVALID_WEBHOOK_ID", "INVALID_WEBHOOK_SECRET", "STALE_WEBHOOK", "INVALID_WEBHOOK_SIGNATURE"].includes(error.message)
+        );
+        if (invalid) throw new ApiError(400, "VALIDATION_ERROR", "El evento no es válido.");
+        throw new ApiError(503, "INTERNAL_ERROR", "El evento quedó pendiente de reintento seguro.");
+      }
+    } catch (error) { next(error); }
+  });
+
   app.use(express.json({ limit: "16kb", strict: true }));
 
   app.get("/api/admin/health", authenticate, (request: AdminRequest, response) => {
@@ -91,6 +191,117 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
       if (typeof request.query.category === "string") filters.category = request.query.category;
       const data = await applicationService().list(filters);
       response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/admin/users", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const input: { pageSize?: string; pageToken?: string; email?: string } = {};
+      if (typeof request.query.pageSize === "string") input.pageSize = request.query.pageSize;
+      if (typeof request.query.pageToken === "string") input.pageToken = request.query.pageToken;
+      if (typeof request.query.email === "string") input.email = request.query.email;
+      const data = await userService().list(input);
+      response.status(200).json(usersListResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/admin/users/:uid", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const value = typeof request.params.uid === "string" ? request.params.uid : "";
+      const data = await userService().get(value);
+      response.status(200).json(userResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  for (const action of ["suspend", "reactivate", "revoke-sessions"] as const satisfies readonly UserControlAction[]) {
+    app.post(`/api/admin/users/:uid/${action}`, authenticate, async (request: AdminRequest, response, next) => {
+      try {
+        const data = await userControlService().execute({
+          action,
+          uid: typeof request.params.uid === "string" ? request.params.uid : "",
+          body: request.body,
+          idempotencyKey: request.header("Idempotency-Key"),
+          principal: principalFrom(request),
+          requestId: requestIdFrom(response)
+        });
+        response.status(200).json(userOperationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+      } catch (error) { next(error); }
+    });
+  }
+
+  app.get("/api/admin/invitations", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const input: { pageSize?: string; pageToken?: string; email?: string } = {};
+      if (typeof request.query.pageSize === "string") input.pageSize = request.query.pageSize;
+      if (typeof request.query.pageToken === "string") input.pageToken = request.query.pageToken;
+      if (typeof request.query.email === "string") input.email = request.query.email;
+      const data = await invitationQueryService().list(input);
+      response.status(200).json(invitationsListResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/admin/invitations/:invitationId", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const data = await invitationQueryService().get(routeParam(request.params.invitationId));
+      response.status(200).json(invitationDetailResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/admin/invitations", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const data = await invitationService().create({
+        body: request.body,
+        idempotencyKey: request.header("Idempotency-Key"),
+        principal: principalFrom(request),
+        requestId: requestIdFrom(response)
+      });
+      response.status(201).json(invitationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/admin/invitations/:invitationId/resend", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const data = await invitationService().resend({
+        invitationId: routeParam(request.params.invitationId), body: request.body,
+        idempotencyKey: request.header("Idempotency-Key"), principal: principalFrom(request), requestId: requestIdFrom(response)
+      });
+      response.status(200).json(invitationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/admin/invitations/:invitationId/revoke", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const data = await invitationService().revoke({
+        invitationId: routeParam(request.params.invitationId), body: request.body,
+        idempotencyKey: request.header("Idempotency-Key"), principal: principalFrom(request), requestId: requestIdFrom(response)
+      });
+      response.status(200).json(invitationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/invitations/validate", async (request, response, next) => {
+    try {
+      const data = await invitationAcceptanceService().validate(request.body, sourceIdentifier(request));
+      response.status(200).json(invitationValidationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/invitations/establish-password", requireHttps, async (request, response, next) => {
+    try {
+      const data = await invitationAcceptanceService().establishPassword(request.body, sourceIdentifier(request), requestIdFrom(response));
+      response.status(200).json(passwordEstablishmentResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/invitations/:invitationId/confirm", authenticateUser, async (request: AuthenticatedRequest, response, next) => {
+    try {
+      if (!request.authenticatedPrincipal) throw new ApiError(401, "AUTH_REQUIRED", "Se requiere una sesión válida.");
+      const data = await invitationAcceptanceService().confirm(routeParam(request.params.invitationId), request.authenticatedPrincipal, requestIdFrom(response));
+      response.status(200).json(invitationConfirmationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
     } catch (error) { next(error); }
   });
 
@@ -132,7 +343,15 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     } catch (error) { next(error); }
   });
 
-  app.all(["/api/admin/applications", "/api/admin/applications/:appId", "/api/admin/applications/:appId/:action"], (_request, _response, next) => {
+  app.all(["/api/admin/applications", "/api/admin/applications/:appId", "/api/admin/applications/:appId/:action", "/api/admin/users", "/api/admin/users/:uid", "/api/admin/users/:uid/:action", "/api/admin/invitations", "/api/admin/invitations/:invitationId", "/api/admin/invitations/:invitationId/:action"], (_request, _response, next) => {
+    next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
+  });
+
+  app.all(["/api/invitations/validate", "/api/invitations/establish-password", "/api/invitations/:invitationId/confirm"], (_request, _response, next) => {
+    next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
+  });
+
+  app.all("/api/webhooks/resend", (_request, _response, next) => {
     next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
   });
 
