@@ -21,6 +21,7 @@ import { invitationConfirmationResponseSchema, invitationValidationResponseSchem
 import { ResendWebhookService } from "./invitations/resend-webhook-service.js";
 import type { WebhookReplayStore } from "./invitations/resend-invitation-email-provider.js";
 import { InvitationQueryService } from "./invitations/invitation-query-service.js";
+import { AccessGrantService } from "./access-grants/access-grant-service.js";
 
 export type AdminApiDependencies = {
   verifyIdToken: VerifyIdToken;
@@ -56,6 +57,9 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
   const authenticateUser = requireAuthenticatedUser(dependencies.verifyIdToken);
   const applications = dependencies.firestore ? new ApplicationService(dependencies.firestore) : null;
   const users = dependencies.firestore && dependencies.userDirectory ? new UserQueryService(dependencies.userDirectory, dependencies.firestore) : null;
+  const accessGrants = dependencies.firestore && dependencies.userDirectory
+    ? new AccessGrantService(dependencies.firestore, dependencies.userDirectory, () => Timestamp.fromDate(now()))
+    : null;
   const userControl = dependencies.firestore && dependencies.userDirectory
     ? new UserControlService(dependencies.userDirectory, dependencies.firestore, dependencies.protectedSuperAdminUid ?? null)
     : null;
@@ -95,6 +99,11 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
   function userControlService(): UserControlService {
     if (!userControl) throw new ApiError(503, "INTERNAL_ERROR", "El control de cuentas no está disponible.");
     return userControl;
+  }
+
+  function accessGrantService(): AccessGrantService {
+    if (!accessGrants) throw new ApiError(503, "INTERNAL_ERROR", "El servicio de permisos no está disponible.");
+    return accessGrants;
   }
 
   function invitationService(): InvitationService {
@@ -231,6 +240,39 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     });
   }
 
+  app.get("/api/admin/users/:userId/access-grants", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const data = await accessGrantService().listForUser(routeParam(request.params.userId));
+      response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/admin/applications/:applicationId/access-grants", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      const data = await accessGrantService().listForApplication(routeParam(request.params.applicationId));
+      response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+    } catch (error) { next(error); }
+  });
+
+  for (const action of ["grant", "revoke"] as const) {
+    app.post(`/api/admin/users/:userId/access-grants/:applicationId/${action}`, authenticate, async (request: AdminRequest, response, next) => {
+      try {
+        const data = await accessGrantService().execute({
+          action,
+          userId: routeParam(request.params.userId),
+          applicationId: routeParam(request.params.applicationId),
+          body: request.body,
+          idempotencyKey: request.header("Idempotency-Key"),
+          principal: principalFrom(request),
+          requestId: requestIdFrom(response)
+        });
+        response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+      } catch (error) { next(error); }
+    });
+  }
+
   app.get("/api/admin/invitations", authenticate, async (request: AdminRequest, response, next) => {
     try {
       principalFrom(request);
@@ -343,7 +385,7 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     } catch (error) { next(error); }
   });
 
-  app.all(["/api/admin/applications", "/api/admin/applications/:appId", "/api/admin/applications/:appId/:action", "/api/admin/users", "/api/admin/users/:uid", "/api/admin/users/:uid/:action", "/api/admin/invitations", "/api/admin/invitations/:invitationId", "/api/admin/invitations/:invitationId/:action"], (_request, _response, next) => {
+  app.all(["/api/admin/applications", "/api/admin/applications/:appId", "/api/admin/applications/:appId/:action", "/api/admin/applications/:applicationId/access-grants", "/api/admin/users", "/api/admin/users/:uid", "/api/admin/users/:uid/:action", "/api/admin/users/:userId/access-grants", "/api/admin/users/:userId/access-grants/:applicationId/:action", "/api/admin/invitations", "/api/admin/invitations/:invitationId", "/api/admin/invitations/:invitationId/:action"], (_request, _response, next) => {
     next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
   });
 

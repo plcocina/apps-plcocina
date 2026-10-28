@@ -65,26 +65,19 @@ export const applicationUniqueKeyDocumentSchema = z.object({
 }).strict();
 
 export const accessGrantDocumentSchema = z.object({
-  uid: uidSchema,
-  appId: documentIdSchema,
-  status: z.enum(["active", "suspended", "revoked", "expired"]),
-  grantedAt: timestampSchema,
-  grantedBy: uidSchema,
-  validFrom: timestampSchema,
-  validUntil: timestampSchema.nullable(),
+  userId: uidSchema,
+  applicationId: documentIdSchema,
+  status: z.enum(["active", "revoked"]),
+  createdAt: timestampSchema,
+  createdBy: uidSchema,
+  updatedAt: timestampSchema,
+  updatedBy: uidSchema,
   revokedAt: timestampSchema.nullable(),
   revokedBy: uidSchema.nullable(),
-  revokeReason: z.string().trim().min(1).max(500).nullable(),
-  updatedAt: timestampSchema,
+  revokeReason: z.string().trim().min(3).max(500).nullable(),
+  revision: z.number().int().positive(),
   version: z.literal(1)
 }).strict().superRefine((grant, context) => {
-  if (grant.validUntil && grant.validUntil.toMillis() <= grant.validFrom.toMillis()) {
-    context.addIssue({
-      code: "custom",
-      path: ["validUntil"],
-      message: "La vigencia final debe ser posterior a la vigencia inicial"
-    });
-  }
   if (grant.status === "revoked" && (!grant.revokedAt || !grant.revokedBy || !grant.revokeReason)) {
     context.addIssue({
       code: "custom",
@@ -194,12 +187,13 @@ export const auditEventDocumentSchema = z.object({
 
 export const adminOperationDocumentSchema = z.object({
   operationId: z.string().uuid(),
-  type: z.enum(["user.suspend", "user.reactivate", "user.revoke_sessions", "invitation.create", "invitation.resend", "invitation.revoke", "invitation.accept", "invitation.expire"]),
+  type: z.enum(["user.suspend", "user.reactivate", "user.revoke_sessions", "invitation.create", "invitation.resend", "invitation.revoke", "invitation.accept", "invitation.expire", "access_grant.grant", "access_grant.revoke"]),
   targetUid: uidSchema,
+  appId: documentIdSchema.nullable().default(null),
   invitationId: z.string().uuid().nullable().default(null),
   actorUid: uidSchema,
   inputHash: z.string().regex(/^[a-f0-9]{64}$/),
-  expectedRevision: z.number().int().positive().nullable(),
+  expectedRevision: z.number().int().nonnegative().nullable(),
   status: z.enum(["pending", "auth_applied", "completed", "reconciliation_required"]),
   checkpoint: z.enum(["reserved", "auth_created", "profile_created", "email_requested", "email_accepted", "password_applied", "completed"]).default("reserved"),
   requestId: z.string().uuid(),
