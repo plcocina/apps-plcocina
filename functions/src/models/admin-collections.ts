@@ -1,5 +1,6 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
+import { userV2DocumentSchema } from "../identities/identity-models.js";
 
 const timestampSchema = z.instanceof(Timestamp);
 const uidSchema = z.string().min(1).max(128).refine((value) => !value.includes("/"));
@@ -177,8 +178,8 @@ export const auditEventDocumentSchema = z.object({
   result: z.enum(["success", "failure"]),
   version: z.literal(1)
 }).strict().superRefine((event, context) => {
-  if ((event.actorType === "admin" || event.actorType === "user") && (!event.actorUid || !event.actorEmail)) {
-    context.addIssue({ code: "custom", message: "Un actor humano requiere UID y correo" });
+  if ((event.actorType === "admin" || event.actorType === "user") && !event.actorUid) {
+    context.addIssue({ code: "custom", path: ["actorUid"], message: "Un actor humano requiere UID" });
   }
   if (event.actorType === "provider" && !event.providerEventId) {
     context.addIssue({ code: "custom", path: ["providerEventId"], message: "Un evento de proveedor requiere identificador" });
@@ -236,6 +237,8 @@ export const webhookReplayEventDocumentSchema = z.object({
 });
 
 export type UserDocument = z.infer<typeof userDocumentSchema>;
+export const userProfileDocumentSchema = z.union([userDocumentSchema, userV2DocumentSchema]);
+export type UserProfileDocument = z.infer<typeof userProfileDocumentSchema>;
 export type ApplicationDocument = z.infer<typeof applicationDocumentSchema>;
 export type ApplicationUniqueKeyDocument = z.infer<typeof applicationUniqueKeyDocumentSchema>;
 export type AccessGrantDocument = z.infer<typeof accessGrantDocumentSchema>;
