@@ -113,6 +113,26 @@ export const userOperationResponseSchema = z.object({
   requestId: requestIdSchema
 }).strict();
 
+const publicAccessGrantSchema = z.object({
+  grantId: z.string().regex(/^[a-f0-9]{64}$/),
+  userId: z.string().min(1).max(128),
+  applicationId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
+  status: z.enum(["active", "revoked"]),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  revokedAt: z.string().datetime().nullable(),
+  revision: z.number().int().positive()
+}).strict();
+
+export const accessGrantsListResponseSchema = z.object({
+  ok: z.literal(true),
+  data: z.object({
+    accessGrants: z.array(publicAccessGrantSchema),
+    nextCursor: z.string().min(1).max(1024).optional()
+  }).strict(),
+  requestId: requestIdSchema
+}).strict();
+
 export const invitationResponseSchema = z.object({
   ok: z.literal(true),
   data: z.object({

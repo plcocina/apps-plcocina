@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { Timestamp, type Firestore, type QueryDocumentSnapshot } from "firebase-admin/firestore";
+import { FieldPath, Timestamp, type Firestore, type Query } from "firebase-admin/firestore";
 import { z } from "zod";
 import type { AdminPrincipal } from "../auth/require-super-admin.js";
 import { ApiError } from "../http/errors.js";
@@ -22,6 +22,16 @@ const mutationSchema = z.object({
   reason: z.string().trim().min(3).max(500).optional()
 }).strict();
 const idempotencyKeySchema = z.string().uuid();
+const listStatusSchema = z.enum(["active", "revoked"]);
+const listLimitSchema = z.coerce.number().int().min(1).max(100).default(50);
+const CURSOR_VERSION = 1;
+const CURSOR_BYTES = 73;
+
+export type AccessGrantListInput = {
+  limit?: unknown;
+  cursor?: unknown;
+  status?: unknown;
+};
 
 type Action = "grant" | "revoke";
 export type AccessGrantResult = {
@@ -67,6 +77,38 @@ function publicGrant(grantId: string, grant: AccessGrantDocument) {
   };
 }
 
+function cursorScope(endpoint: "user" | "application", resourceId: string, status: AccessGrantDocument["status"] | null): Buffer {
+  return createHash("sha256").update(JSON.stringify({ v: CURSOR_VERSION, endpoint, resourceId, status })).digest();
+}
+
+function decodeCursor(value: unknown, scope: Buffer) {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length < 1 || value.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new ApiError(400, "VALIDATION_ERROR", "El cursor no es válido.");
+  }
+  try {
+    const cursor = Buffer.from(value, "base64url");
+    if (cursor.toString("base64url") !== value || cursor.length !== CURSOR_BYTES || cursor.readUInt8(0) !== CURSOR_VERSION) {
+      throw new Error("invalid cursor form");
+    }
+    if (!cursor.subarray(1, 33).equals(scope)) throw new Error("cursor scope mismatch");
+    const updatedAt = cursor.readBigUInt64BE(33);
+    if (updatedAt > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("invalid cursor timestamp");
+    return { updatedAt: Number(updatedAt), grantId: cursor.subarray(41, 73).toString("hex") };
+  } catch {
+    throw new ApiError(400, "VALIDATION_ERROR", "El cursor no es válido.");
+  }
+}
+
+function encodeCursor(scope: Buffer, updatedAt: Timestamp, grantId: string): string {
+  const cursor = Buffer.alloc(CURSOR_BYTES);
+  cursor.writeUInt8(CURSOR_VERSION, 0);
+  scope.copy(cursor, 1);
+  cursor.writeBigUInt64BE(BigInt(updatedAt.toMillis()), 33);
+  Buffer.from(grantId, "hex").copy(cursor, 41);
+  return cursor.toString("base64url");
+}
+
 export class AccessGrantService {
   constructor(
     private readonly db: Firestore,
@@ -74,18 +116,16 @@ export class AccessGrantService {
     private readonly now = () => Timestamp.now()
   ) {}
 
-  async listForUser(userIdInput: string) {
+  async listForUser(userIdInput: string, input: AccessGrantListInput = {}) {
     const userId = parse(userIdSchema, userIdInput, "El identificador de usuario no es válido.");
     await this.validUser(userId);
-    const snapshot = await this.db.collection("accessGrants").where("userId", "==", userId).limit(500).get();
-    return this.sorted(snapshot.docs);
+    return this.list("user", "userId", userId, input);
   }
 
-  async listForApplication(applicationIdInput: string) {
+  async listForApplication(applicationIdInput: string, input: AccessGrantListInput = {}) {
     const applicationId = parse(applicationIdSchema, applicationIdInput, "El identificador de aplicación no es válido.");
     await this.validApplication(applicationId);
-    const snapshot = await this.db.collection("accessGrants").where("applicationId", "==", applicationId).limit(500).get();
-    return this.sorted(snapshot.docs);
+    return this.list("application", "applicationId", applicationId, input);
   }
 
   async execute(input: {
@@ -183,9 +223,29 @@ export class AccessGrantService {
     });
   }
 
-  private sorted(docs: QueryDocumentSnapshot[]) {
-    return docs.map((snapshot) => publicGrant(snapshot.id, accessGrantDocumentSchema.parse(snapshot.data())))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  private async list(
+    endpoint: "user" | "application",
+    field: "userId" | "applicationId",
+    resourceId: string,
+    input: AccessGrantListInput
+  ) {
+    const limit = parse(listLimitSchema, input.limit, "El límite debe ser un entero entre 1 y 100.");
+    const status = input.status === undefined
+      ? null
+      : parse(listStatusSchema, input.status, "El status debe ser active o revoked.");
+    const scope = cursorScope(endpoint, resourceId, status);
+    const cursor = decodeCursor(input.cursor, scope);
+    let query: Query = this.db.collection("accessGrants").where(field, "==", resourceId);
+    if (status) query = query.where("status", "==", status);
+    query = query.orderBy("updatedAt", "desc").orderBy(FieldPath.documentId(), "desc");
+    if (cursor) query = query.startAfter(Timestamp.fromMillis(cursor.updatedAt), cursor.grantId);
+    const snapshot = await query.limit(limit + 1).get();
+    const page = snapshot.docs.slice(0, limit);
+    const accessGrants = page.map((document) => publicGrant(document.id, accessGrantDocumentSchema.parse(document.data())));
+    if (snapshot.docs.length <= limit || page.length === 0) return { accessGrants };
+    const last = page[page.length - 1]!;
+    const lastGrant = accessGrantDocumentSchema.parse(last.data());
+    return { accessGrants, nextCursor: encodeCursor(scope, lastGrant.updatedAt, last.id) };
   }
 
   private async validUser(userId: string): Promise<DirectoryUser> {

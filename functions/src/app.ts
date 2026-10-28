@@ -5,7 +5,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { ApplicationService, publicApplication } from "./applications/application-service.js";
 import { requireSuperAdmin, type AdminRequest, type VerifyIdToken } from "./auth/require-super-admin.js";
 import { ADMIN_API_VERSION, REGION } from "./config.js";
-import { healthResponseSchema, invitationDetailResponseSchema, invitationResponseSchema, invitationsListResponseSchema, meResponseSchema, userResponseSchema, usersListResponseSchema } from "./http/contracts.js";
+import { accessGrantsListResponseSchema, healthResponseSchema, invitationDetailResponseSchema, invitationResponseSchema, invitationsListResponseSchema, meResponseSchema, userResponseSchema, usersListResponseSchema } from "./http/contracts.js";
 import { ApiError, errorHandler } from "./http/errors.js";
 import { requestContext, requestIdFrom } from "./http/request-context.js";
 import { requireHttps, restrictedCors, securityHeaders } from "./http/security.js";
@@ -243,16 +243,20 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
   app.get("/api/admin/users/:userId/access-grants", authenticate, async (request: AdminRequest, response, next) => {
     try {
       principalFrom(request);
-      const data = await accessGrantService().listForUser(routeParam(request.params.userId));
-      response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+      const data = await accessGrantService().listForUser(routeParam(request.params.userId), {
+        limit: request.query.limit, cursor: request.query.cursor, status: request.query.status
+      });
+      response.status(200).json(accessGrantsListResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
     } catch (error) { next(error); }
   });
 
   app.get("/api/admin/applications/:applicationId/access-grants", authenticate, async (request: AdminRequest, response, next) => {
     try {
       principalFrom(request);
-      const data = await accessGrantService().listForApplication(routeParam(request.params.applicationId));
-      response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
+      const data = await accessGrantService().listForApplication(routeParam(request.params.applicationId), {
+        limit: request.query.limit, cursor: request.query.cursor, status: request.query.status
+      });
+      response.status(200).json(accessGrantsListResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
     } catch (error) { next(error); }
   });
 

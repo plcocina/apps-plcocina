@@ -19,6 +19,7 @@ class FakeQuery {
   private max = 500;
   constructor(private readonly db: FakeFirestore, private readonly collection: string, private readonly field: string, private readonly value: unknown) {}
   limit(value: number) { this.max = value; return this; }
+  orderBy() { return this; }
   async get() {
     const docs = [...this.db.data.entries()]
       .filter(([path, value]) => path.startsWith(`${this.collection}/`) && value[this.field] === this.value)
@@ -192,7 +193,8 @@ describe("access grant routes", () => {
     const listed = await request(app).get("/api/admin/users/user-1/access-grants")
       .set("Origin", "https://apps.plcocina.com").set("Authorization", "Bearer token");
     expect(listed.status).toBe(200);
-    expect(listed.body.data).toHaveLength(1);
+    expect(listed.body.data.accessGrants).toHaveLength(1);
+    expect(listed.body.data).not.toHaveProperty("nextCursor");
   });
 
   it("rejects a non-admin before executing the operation", async () => {
