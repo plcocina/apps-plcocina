@@ -188,7 +188,7 @@ export const auditEventDocumentSchema = z.object({
 
 export const adminOperationDocumentSchema = z.object({
   operationId: z.string().uuid(),
-  type: z.enum(["user.suspend", "user.reactivate", "user.revoke_sessions", "invitation.create", "invitation.resend", "invitation.revoke", "invitation.accept", "invitation.expire", "access_grant.grant", "access_grant.revoke"]),
+  type: z.enum(["user.suspend", "user.reactivate", "user.revoke_sessions", "invitation.create", "invitation.resend", "invitation.revoke", "invitation.accept", "invitation.expire", "access_grant.grant", "access_grant.revoke", "identity.preprovision"]),
   targetUid: uidSchema,
   appId: documentIdSchema.nullable().default(null),
   invitationId: z.string().uuid().nullable().default(null),
@@ -196,7 +196,7 @@ export const adminOperationDocumentSchema = z.object({
   inputHash: z.string().regex(/^[a-f0-9]{64}$/),
   expectedRevision: z.number().int().nonnegative().nullable(),
   status: z.enum(["pending", "auth_applied", "completed", "reconciliation_required"]),
-  checkpoint: z.enum(["reserved", "auth_created", "profile_created", "email_requested", "email_accepted", "password_applied", "completed"]).default("reserved"),
+  checkpoint: z.enum(["reserved", "identifier_reserved", "auth_created", "profile_created", "email_requested", "email_accepted", "password_applied", "completed"]).default("reserved"),
   requestId: z.string().uuid(),
   leaseOwner: z.string().uuid(),
   leaseExpiresAt: timestampSchema,
