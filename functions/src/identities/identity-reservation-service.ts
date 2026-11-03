@@ -81,6 +81,20 @@ export class IdentityReservationService {
 
       if (keySnapshot.exists) {
         const key = identityIdentifierKeyDocumentSchema.safeParse(keySnapshot.data());
+        if (key.success
+          && key.data.state === "reserved"
+          && key.data.uid === uid
+          && key.data.kind === input.kind
+          && key.data.identifierHash === identifierHash) {
+          return {
+            operationId: key.data.operationId,
+            uid,
+            kind: input.kind,
+            identifierHash,
+            state: "reserved",
+            replayed: true
+          };
+        }
         if (!key.success || key.data.state !== "released") {
           throw new IdentityReservationError("IDENTIFIER_COLLISION", "El identificador ya está reservado.");
         }
