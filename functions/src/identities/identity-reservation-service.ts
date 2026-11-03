@@ -5,6 +5,7 @@ import {
   identifierKeyHash,
   identityIdentifierKeyDocumentSchema,
   identityReservationOperationSchema,
+  normalizeGoogleSubject,
   normalizeIdentityEmail,
   normalizePhoneE164,
   type IdentityIdentifierKind
@@ -52,7 +53,9 @@ export class IdentityReservationService {
     const uid = uidSchema.parse(input.uid);
     const normalized = input.kind === "email"
       ? normalizeIdentityEmail(input.value)
-      : normalizePhoneE164(input.value);
+      : input.kind === "phone"
+        ? normalizePhoneE164(input.value)
+        : normalizeGoogleSubject(input.value);
     const identifierHash = identifierKeyHash(input.kind, normalized, this.pepper);
     const inputHash = canonicalInputHash({ uid, kind: input.kind, identifierHash });
     const keyRef = this.db.collection("authIdentifierKeys").doc(identifierHash);
