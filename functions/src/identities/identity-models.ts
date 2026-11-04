@@ -15,6 +15,10 @@ export const activationStatusSchema = z.enum([
   "recovery_required",
   "reconciliation_required"
 ]);
+export const googleWorkspaceActivationStatusSchema = z.union([
+  activationStatusSchema,
+  z.literal("linked_pending_activation")
+]);
 export const identityIdentifierKindSchema = z.enum(["phone", "email", "googleSubject"]);
 
 export const googleWorkspaceLinkingStatusSchema = z.enum([
@@ -129,7 +133,7 @@ export const googleWorkspaceUserV21DocumentSchema = z.object({
   phoneVerifiedAt: z.null(),
   emailVerifiedAt: timestampSchema.nullable(),
   googleWorkspace: googleWorkspaceIdentitySchema,
-  activationStatus: activationStatusSchema,
+  activationStatus: googleWorkspaceActivationStatusSchema,
   credentialRevision: z.number().int().positive(),
   authorizationRevision: z.number().int().positive(),
   sessionValidAfter: timestampSchema,
@@ -166,6 +170,14 @@ export const googleWorkspaceUserV21DocumentSchema = z.object({
   if (user.activationStatus === "active" && (!linkedAndVerified || user.status !== "active" || user.authDisabled)) {
     context.addIssue({ code: "custom", path: ["activationStatus"], message: "Una identidad Google activa debe estar verificada y vinculada" });
   }
+  if (user.activationStatus === "linked_pending_activation"
+    && (!linkedAndVerified || user.status !== "invited" || !user.authDisabled)) {
+    context.addIssue({
+      code: "custom",
+      path: ["activationStatus"],
+      message: "Una identidad vinculada pendiente de activación debe permanecer invitada y deshabilitada"
+    });
+  }
   if (user.activationStatus === "pending" && (user.status !== "invited" || !user.authDisabled || user.googleWorkspace.linkingStatus !== "declared")) {
     context.addIssue({ code: "custom", path: ["activationStatus"], message: "Una identidad Google pendiente debe permanecer declarada, invitada y deshabilitada" });
   }
@@ -176,6 +188,11 @@ export const googleWorkspaceUserV21DocumentSchema = z.object({
   if ((user.activationStatus === "reconciliation_required")
     !== (user.googleWorkspace.linkingStatus === "reconciliation_required")) {
     context.addIssue({ code: "custom", path: ["activationStatus"], message: "La conciliación del perfil y de Google debe coincidir" });
+  }
+  if (user.googleWorkspace.linkingStatus === "linked"
+    && user.activationStatus !== "active"
+    && user.activationStatus !== "linked_pending_activation") {
+    context.addIssue({ code: "custom", path: ["activationStatus"], message: "Una identidad vinculada debe estar activa o pendiente de activación" });
   }
 });
 
@@ -288,6 +305,7 @@ export type UserV2Document = z.infer<typeof userV2DocumentSchema>;
 export type AuthMethod = z.infer<typeof authMethodSchema>;
 export type AuthMethodV21 = z.infer<typeof authMethodV21Schema>;
 export type ActivationStatus = z.infer<typeof activationStatusSchema>;
+export type GoogleWorkspaceActivationStatus = z.infer<typeof googleWorkspaceActivationStatusSchema>;
 export type IdentityIdentifierKind = z.infer<typeof identityIdentifierKindSchema>;
 export type IdentityIdentifierKeyDocument = z.infer<typeof identityIdentifierKeyDocumentSchema>;
 export type GoogleWorkspaceIdentity = z.infer<typeof googleWorkspaceIdentitySchema>;
