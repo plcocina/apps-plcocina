@@ -1,4 +1,4 @@
-import { Timestamp, type Firestore } from "firebase-admin/firestore";
+import { Timestamp, type Firestore, type Transaction } from "firebase-admin/firestore";
 import { z } from "zod";
 import {
   authChallengeDocumentSchema,
@@ -76,6 +76,34 @@ function assertLookupContext(document: AuthChallengeDocument, input: z.output<ty
   }
 }
 
+export type PreparedAuthChallengeConsumption = Readonly<{
+  document: AuthChallengeDocument;
+  apply: () => void;
+}>;
+
+export async function prepareAuthChallengeConsumption(input: {
+  db: Firestore;
+  transaction: Transaction;
+  challengeId: string;
+  context: AuthChallengeTrustedContext;
+  now: Timestamp;
+}): Promise<PreparedAuthChallengeConsumption> {
+  const challengeId = uuidSchema.parse(input.challengeId);
+  const reference = input.db.collection("identityAuthChallenges").doc(challengeId);
+  const snapshot = await input.transaction.get(reference);
+  if (!snapshot.exists) throw new AuthChallengePersistenceError("CHALLENGE_NOT_FOUND");
+  const document = parseStored(snapshot.data());
+  if (document.challengeId !== challengeId) throw new AuthChallengePersistenceError("CHALLENGE_MALFORMED");
+  evaluateAuthChallenge({ challenge: document, context: input.context, now: input.now });
+  const next = authChallengeDocumentSchema.parse({
+    ...document,
+    state: "consumed",
+    stateChangedAt: input.now,
+    revision: document.revision + 1
+  });
+  return Object.freeze({ document: next, apply: () => input.transaction.set(reference, next) });
+}
+
 export class AuthChallengePersistenceService {
   constructor(
     private readonly db: Firestore,
@@ -146,23 +174,11 @@ export class AuthChallengePersistenceService {
     context: AuthChallengeTrustedContext;
   }): Promise<AuthChallengeDocument> {
     this.assertAuthorized(uidSchema.parse(input.trustedOperatorUid));
-    const challengeId = uuidSchema.parse(input.challengeId);
-    const reference = this.db.collection("identityAuthChallenges").doc(challengeId);
     return this.db.runTransaction(async (transaction) => {
-      const snapshot = await transaction.get(reference);
-      if (!snapshot.exists) throw new AuthChallengePersistenceError("CHALLENGE_NOT_FOUND");
-      const document = parseStored(snapshot.data());
-      if (document.challengeId !== challengeId) throw new AuthChallengePersistenceError("CHALLENGE_MALFORMED");
-      const changedAt = this.now();
-      evaluateAuthChallenge({ challenge: document, context: input.context, now: changedAt });
-      const next = authChallengeDocumentSchema.parse({
-        ...document,
-        state: "consumed",
-        stateChangedAt: changedAt,
-        revision: document.revision + 1
-      });
-      transaction.set(reference, next);
-      return next;
+      const prepared = await prepareAuthChallengeConsumption({ db: this.db, transaction,
+        challengeId: input.challengeId, context: input.context, now: this.now() });
+      prepared.apply();
+      return prepared.document;
     });
   }
 

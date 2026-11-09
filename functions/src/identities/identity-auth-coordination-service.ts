@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Timestamp, type Firestore } from "firebase-admin/firestore";
+import { Timestamp, type Firestore, type Transaction } from "firebase-admin/firestore";
 import { z } from "zod";
 import { auditEventDocumentSchema } from "../models/admin-collections.js";
 import { authCoordinationDocumentSchema, type AuthCoordinationDocument, type TrustedAuthCoordinationEvent } from "./identity-auth-coordination-contracts.js";
@@ -56,6 +56,81 @@ function assertInitial(document: AuthCoordinationDocument): void {
     || document.evidence.firebaseProvider !== null || document.evidence.postflight !== null) {
     throw new AuthCoordinationPersistenceError("INITIAL_STATE_INVALID");
   }
+}
+
+export type PreparedAuthCoordinationTransition = Readonly<{
+  previousDocument: AuthCoordinationDocument;
+  result: AuthCoordinationPersistenceResult;
+  apply: () => void;
+}>;
+
+export async function prepareAuthCoordinationTransition(input: {
+  db: Firestore;
+  transaction: Transaction;
+  trustedAdministratorUid: string;
+  protectedSuperAdminUid: string;
+  operationId: string;
+  expectedRevision: number;
+  event: TrustedAuthCoordinationEvent;
+  now: Timestamp;
+}): Promise<PreparedAuthCoordinationTransition> {
+  const actorUid = uidSchema.parse(input.trustedAdministratorUid);
+  const protectedUid = uidSchema.parse(input.protectedSuperAdminUid);
+  if (actorUid !== protectedUid) throw new AuthCoordinationPersistenceError("TRUSTED_CONTEXT_MISMATCH");
+  const operationId = uuidSchema.parse(input.operationId);
+  const expectedRevision = z.number().int().positive().parse(input.expectedRevision);
+  if (input.event.operationId !== operationId || input.event.expectedCoordinationRevision !== expectedRevision) {
+    throw new AuthCoordinationPersistenceError("REVISION_CONFLICT");
+  }
+  const inputHash = canonicalHash(input.event);
+  const operationRef = input.db.collection("identityAuthCoordinations").doc(operationId);
+  const idempotencyRef = input.db.collection("identityAuthCoordinationIdempotency").doc(input.event.idempotencyKey);
+  const operationSnapshot = await input.transaction.get(operationRef);
+  if (!operationSnapshot.exists) throw new AuthCoordinationPersistenceError("OPERATION_NOT_FOUND");
+  const document = authCoordinationDocumentSchema.parse(operationSnapshot.data());
+  const uidLockRef = input.db.collection("identityAuthCoordinationLocks").doc(lockId("uid", document.expectedFirebaseUid));
+  const subjectLockRef = input.db.collection("identityAuthCoordinationLocks").doc(lockId("googleSubject", document.googleSubjectHash));
+  const [idempotencySnapshot, uidLockSnapshot, subjectLockSnapshot] = await Promise.all([
+    input.transaction.get(idempotencyRef), input.transaction.get(uidLockRef), input.transaction.get(subjectLockRef)
+  ]);
+  if (idempotencySnapshot.exists) {
+    const stored = idempotencySchema.safeParse(idempotencySnapshot.data());
+    if (!stored.success || stored.data.kind !== "transition" || stored.data.operationId !== operationId
+      || stored.data.inputHash !== inputHash) throw new AuthCoordinationPersistenceError("IDEMPOTENCY_CONFLICT");
+    return Object.freeze({ previousDocument: document, result: { document, replayed: true }, apply: () => undefined });
+  }
+  for (const snapshot of [uidLockSnapshot, subjectLockSnapshot]) {
+    const lock = lockSchema.safeParse(snapshot.data());
+    if (!snapshot.exists || !lock.success || lock.data.operationId !== operationId
+      || lock.data.expectedFirebaseUid !== document.expectedFirebaseUid
+      || lock.data.googleSubjectHash !== document.googleSubjectHash) {
+      throw new AuthCoordinationPersistenceError("LOCK_INCONSISTENT");
+    }
+  }
+  if (document.revision !== expectedRevision) throw new AuthCoordinationPersistenceError("REVISION_CONFLICT");
+  const evaluated = evaluateAuthCoordinationTransition({ document, event: input.event, now: input.now,
+    protectedSuperAdminUid: protectedUid });
+  if (evaluated.replayed) {
+    return Object.freeze({ previousDocument: document, result: { document: evaluated.document, replayed: true },
+      apply: () => undefined });
+  }
+  const next = evaluated.document;
+  const auditRef = input.db.collection("auditEvents").doc(`auth-coordination-${operationId}-${next.revision}`);
+  const idempotency = idempotencySchema.parse({ idempotencyKey: input.event.idempotencyKey, operationId,
+    kind: "transition", inputHash, resultingRevision: next.revision, createdAt: input.now, version: 1 });
+  const audit = auditEventDocumentSchema.parse({ occurredAt: input.now, actorType: "admin", actorUid,
+    actorEmail: null, providerEventId: null, action: "identity.coordination_transitioned", resourceType: "user",
+    resourceId: next.expectedFirebaseUid, targetUid: next.expectedFirebaseUid, appId: null,
+    before: { operationId, state: document.state, revision: document.revision },
+    after: { operationId, state: next.state, revision: next.revision, authDisabled: next.localAuthDisabled },
+    reason: input.event.type, requestId: input.event.idempotencyKey, source: "admin-api", result: "success", version: 1 });
+  return Object.freeze({ previousDocument: document, result: { document: next, replayed: false }, apply: () => {
+    input.transaction.set(operationRef, next);
+    input.transaction.create(idempotencyRef, idempotency);
+    input.transaction.update(uidLockRef, { state: next.state, revision: next.revision, updatedAt: input.now });
+    input.transaction.update(subjectLockRef, { state: next.state, revision: next.revision, updatedAt: input.now });
+    input.transaction.create(auditRef, audit);
+  } });
 }
 
 export class AuthCoordinationPersistenceService {
@@ -119,58 +194,12 @@ export class AuthCoordinationPersistenceService {
 
   async transition(input: { trustedAdministratorUid: string; operationId: string; expectedRevision: number;
     event: TrustedAuthCoordinationEvent }): Promise<AuthCoordinationPersistenceResult> {
-    const actorUid = uidSchema.parse(input.trustedAdministratorUid);
-    if (actorUid !== this.protectedSuperAdminUid) throw new AuthCoordinationPersistenceError("TRUSTED_CONTEXT_MISMATCH");
-    const operationId = uuidSchema.parse(input.operationId);
-    const expectedRevision = z.number().int().positive().parse(input.expectedRevision);
-    if (input.event.operationId !== operationId || input.event.expectedCoordinationRevision !== expectedRevision) {
-      throw new AuthCoordinationPersistenceError("REVISION_CONFLICT");
-    }
-    const inputHash = canonicalHash(input.event);
-    const operationRef = this.db.collection("identityAuthCoordinations").doc(operationId);
-    const idempotencyRef = this.db.collection("identityAuthCoordinationIdempotency").doc(input.event.idempotencyKey);
     return this.db.runTransaction(async (transaction) => {
-      const operationSnapshot = await transaction.get(operationRef);
-      if (!operationSnapshot.exists) throw new AuthCoordinationPersistenceError("OPERATION_NOT_FOUND");
-      const document = authCoordinationDocumentSchema.parse(operationSnapshot.data());
-      const uidLockRef = this.db.collection("identityAuthCoordinationLocks").doc(lockId("uid", document.expectedFirebaseUid));
-      const subjectLockRef = this.db.collection("identityAuthCoordinationLocks").doc(lockId("googleSubject", document.googleSubjectHash));
-      const [idempotencySnapshot, uidLockSnapshot, subjectLockSnapshot] = await Promise.all([
-        transaction.get(idempotencyRef), transaction.get(uidLockRef), transaction.get(subjectLockRef)
-      ]);
-      if (idempotencySnapshot.exists) {
-        const stored = idempotencySchema.safeParse(idempotencySnapshot.data());
-        if (!stored.success || stored.data.kind !== "transition" || stored.data.operationId !== operationId
-          || stored.data.inputHash !== inputHash) throw new AuthCoordinationPersistenceError("IDEMPOTENCY_CONFLICT");
-        return { document, replayed: true };
-      }
-      for (const snapshot of [uidLockSnapshot, subjectLockSnapshot]) {
-        const lock = lockSchema.safeParse(snapshot.data());
-        if (!snapshot.exists || !lock.success || lock.data.operationId !== operationId
-          || lock.data.expectedFirebaseUid !== document.expectedFirebaseUid
-          || lock.data.googleSubjectHash !== document.googleSubjectHash) throw new AuthCoordinationPersistenceError("LOCK_INCONSISTENT");
-      }
-      if (document.revision !== expectedRevision) throw new AuthCoordinationPersistenceError("REVISION_CONFLICT");
-      const timestamp = this.now();
-      const evaluated = evaluateAuthCoordinationTransition({ document, event: input.event, now: timestamp,
-        protectedSuperAdminUid: this.protectedSuperAdminUid });
-      if (evaluated.replayed) return { document: evaluated.document, replayed: true };
-      const next = evaluated.document;
-      const auditRef = this.db.collection("auditEvents").doc(`auth-coordination-${operationId}-${next.revision}`);
-      const idempotency = idempotencySchema.parse({ idempotencyKey: input.event.idempotencyKey, operationId,
-        kind: "transition", inputHash, resultingRevision: next.revision, createdAt: timestamp, version: 1 });
-      const audit = auditEventDocumentSchema.parse({ occurredAt: timestamp, actorType: "admin", actorUid,
-        actorEmail: null, providerEventId: null, action: "identity.coordination_transitioned", resourceType: "user",
-        resourceId: next.expectedFirebaseUid, targetUid: next.expectedFirebaseUid, appId: null,
-        before: { operationId, state: document.state, revision: document.revision },
-        after: { operationId, state: next.state, revision: next.revision, authDisabled: next.localAuthDisabled },
-        reason: input.event.type, requestId: input.event.idempotencyKey, source: "admin-api", result: "success", version: 1 });
-      transaction.set(operationRef, next);
-      transaction.create(idempotencyRef, idempotency);
-      transaction.update(uidLockRef, { state: next.state, revision: next.revision, updatedAt: timestamp });
-      transaction.update(subjectLockRef, { state: next.state, revision: next.revision, updatedAt: timestamp });
-      transaction.create(auditRef, audit);
-      return { document: next, replayed: false };
+      const prepared = await prepareAuthCoordinationTransition({ db: this.db, transaction,
+        trustedAdministratorUid: input.trustedAdministratorUid, protectedSuperAdminUid: this.protectedSuperAdminUid,
+        operationId: input.operationId, expectedRevision: input.expectedRevision, event: input.event, now: this.now() });
+      prepared.apply();
+      return prepared.result;
     });
   }
 }
