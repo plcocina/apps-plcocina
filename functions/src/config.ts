@@ -1,11 +1,15 @@
+import { defineString } from "firebase-functions/params";
+
 export const PROJECT_ID = "plcocina-apps";
 export const REGION = "us-central1";
 export const RUNTIME_SERVICE_ACCOUNT =
   "portal-admin-api@plcocina-apps.iam.gserviceaccount.com";
 export const ADMIN_API_VERSION = "2C-C7";
 
+export const protectedSuperAdminUidParam = defineString("PROTECTED_SUPER_ADMIN_UID");
+
 export function protectedSuperAdminUid(): string | null {
-  const value = process.env.PROTECTED_SUPER_ADMIN_UID?.trim();
+  const value = protectedSuperAdminUidParam.value().trim();
   return value && /^[^/]{1,128}$/.test(value) ? value : null;
 }
 
