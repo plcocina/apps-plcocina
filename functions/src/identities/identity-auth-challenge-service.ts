@@ -11,6 +11,7 @@ import {
   hashAuthChallengeSecret,
   type AuthChallengeSecrets
 } from "./identity-auth-challenge-crypto.js";
+import { readValidIdentityLinkAuthorization } from "./identity-linking-service.js";
 
 const uidSchema = z.string().min(1).max(128).refine((value) => !value.includes("/"));
 const uuidSchema = z.string().uuid();
@@ -26,6 +27,7 @@ const createInputSchema = z.object({
   authorizationId: uuidSchema,
   googleSubjectHash: hashSchema.nullable(),
   trustedSessionId: trustedSessionIdSchema,
+  authorizationBinding: z.object({ operationId: uuidSchema, expectedRevision: z.number().int().nonnegative() }).strict().optional(),
   lifetimeMs: z.number().int().positive().max(MAX_CHALLENGE_LIFETIME_MS)
 }).strict();
 
@@ -152,6 +154,16 @@ export class AuthChallengePersistenceService {
     await this.db.runTransaction(async (transaction) => {
       if ((await transaction.get(reference)).exists) {
         throw new AuthChallengePersistenceError("CHALLENGE_ID_CONFLICT");
+      }
+      if (value.authorizationBinding) {
+        await readValidIdentityLinkAuthorization({
+          db: this.db,
+          transaction,
+          authorizationId: value.authorizationId,
+          expected: { operationId: value.authorizationBinding.operationId, targetUid: value.expectedFirebaseUid,
+            googleSubjectHash: value.googleSubjectHash ?? "", expectedRevision: value.authorizationBinding.expectedRevision },
+          now: issuedAt
+        });
       }
       transaction.create(reference, document);
     });

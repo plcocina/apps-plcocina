@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { deleteApp, initializeApp } from "firebase-admin/app";
 import { Timestamp, getFirestore, type Firestore } from "firebase-admin/firestore";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { GoogleIdentityLinkingService } from "../src/identities/identity-linking-service.js";
+import { GoogleIdentityLinkingService, readValidIdentityLinkAuthorization } from "../src/identities/identity-linking-service.js";
 import { IdentityReservationService } from "../src/identities/identity-reservation-service.js";
 
 let app: ReturnType<typeof initializeApp>;
@@ -119,6 +119,48 @@ async function link(value: Fixture) {
 async function expectRejected(work: Promise<unknown>, code: string) {
   await expect(work).rejects.toMatchObject({ code });
 }
+
+describe("transactional E4B2 authorization reader", () => {
+  it("reads a valid authorization through the supplied Firestore transaction without writing", async () => {
+    const value = await fixture();
+    const ref = db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId);
+    const before = (await ref.get()).data();
+    const result = await db.runTransaction(async (transaction) => readValidIdentityLinkAuthorization({
+      db, transaction, authorizationId: value.authorization.authorizationId,
+      expected: { operationId: value.authorization.operationId, targetUid: value.uid,
+        googleSubjectHash: value.reservation.identifierHash, expectedRevision: 2 }, now: clock
+    }));
+    expect(result).toMatchObject({ authorizationId: value.authorization.authorizationId, state: "pending" });
+    expect((await ref.get()).data()).toEqual(before);
+  });
+
+  it.each([
+    ["missing", null, "AUTHORIZATION_NOT_FOUND"],
+    ["expired", { state: "expired", stateChangedAt: clock }, "AUTHORIZATION_EXPIRED"],
+    ["revoked", { state: "revoked", stateChangedAt: clock }, "AUTHORIZATION_REVOKED"],
+    ["consumed", { state: "consumed", stateChangedAt: clock }, "AUTHORIZATION_CONSUMED"],
+    ["wrong user", { targetUid: "someone-else" }, "AUTHORIZATION_MISMATCH"],
+    ["wrong operation", { operation: "google.other_operation" }, "AUTHORIZATION_MISMATCH"],
+    ["wrong subject", { googleSubjectHash: "f".repeat(64) }, "AUTHORIZATION_MISMATCH"],
+    ["wrong revision", { expectedRevision: 9 }, "AUTHORIZATION_MISMATCH"]
+  ])("rejects %s through the provided transaction", async (_label, override, code) => {
+    const value = await fixture();
+    const ref = db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId);
+    if (override) await ref.set({ ...value.authorization, ...(override as Record<string, unknown>) });
+    const before = (await ref.get()).data();
+    const txDb = new Proxy(db, { get(target, key) {
+      if (key === "runTransaction") return () => { throw new Error("nested transaction"); };
+      const result = Reflect.get(target, key, target) as unknown;
+      return typeof result === "function" ? result.bind(target) : result;
+    } });
+    await expect(db.runTransaction(async (transaction) => readValidIdentityLinkAuthorization({
+      db: txDb, transaction, authorizationId: override ? value.authorization.authorizationId : randomUUID(),
+      expected: { operationId: value.authorization.operationId, targetUid: value.uid,
+        googleSubjectHash: value.reservation.identifierHash, expectedRevision: 2 }, now: clock
+    }))).rejects.toMatchObject({ code });
+    expect((await ref.get()).data()).toEqual(before);
+  });
+});
 
 describe("transactional Google Workspace identity linking", () => {
   it("links a verified identity to the existing UID", async () => {

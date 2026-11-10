@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { Timestamp, type Firestore } from "firebase-admin/firestore";
+import { Timestamp, type Firestore, type Transaction } from "firebase-admin/firestore";
 import { z } from "zod";
 import { auditEventDocumentSchema } from "../models/admin-collections.js";
 import {
   completedIdentityLinkOperationSchema,
   identityLinkAuthorizationSchema,
+  evaluateIdentityLinkAuthorization,
   linkGoogleIdentityRequestSchema,
   type IdentityLinkAuthorization,
   type LinkGoogleIdentityRequest
@@ -80,6 +81,33 @@ export class GoogleIdentityLinkError extends Error {
     super(message);
     this.name = "GoogleIdentityLinkError";
   }
+}
+
+export async function readValidIdentityLinkAuthorization(input: {
+  db: Firestore;
+  transaction: Transaction;
+  authorizationId: string;
+  expected: Pick<IdentityLinkAuthorization, "operationId" | "targetUid" | "googleSubjectHash" | "expectedRevision">;
+  now: Timestamp;
+}): Promise<IdentityLinkAuthorization> {
+  const reference = input.db.collection("identityLinkAuthorizations").doc(input.authorizationId);
+  const snapshot = await input.transaction.get(reference);
+  if (!snapshot.exists) throw new GoogleIdentityLinkError("AUTHORIZATION_NOT_FOUND", "La autorización requerida no existe.");
+  const parsed = identityLinkAuthorizationSchema.safeParse(snapshot.data());
+  if (!parsed.success || parsed.data.authorizationId !== input.authorizationId
+    || parsed.data.operationId !== input.expected.operationId
+    || parsed.data.operation !== "google.identity_link"
+    || parsed.data.targetUid !== input.expected.targetUid
+    || parsed.data.googleSubjectHash !== input.expected.googleSubjectHash
+    || parsed.data.expectedRevision !== input.expected.expectedRevision) {
+    throw new GoogleIdentityLinkError("AUTHORIZATION_MISMATCH", "La autorización no corresponde a esta operación.");
+  }
+  try { evaluateIdentityLinkAuthorization(parsed.data, input.now); }
+  catch (error) {
+    const code = error instanceof Error && "code" in error ? String(error.code) : "AUTHORIZATION_MISMATCH";
+    throw new GoogleIdentityLinkError(code as GoogleIdentityLinkErrorCode, "La autorización no está vigente.");
+  }
+  return parsed.data;
 }
 
 function canonicalHash(value: unknown): string {
