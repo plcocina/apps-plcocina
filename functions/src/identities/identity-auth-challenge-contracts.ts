@@ -74,11 +74,36 @@ const trustedContextSchema = z.object({
   }).strict().nullable()
 }).strict();
 
+const bootstrapContextSchema = z.object({
+  contextType: z.literal("google_bootstrap"),
+  expectedInternalUid: uidSchema,
+  expectedFirebaseUid: uidSchema,
+  coordinationOperationId: uuidSchema,
+  authorizationId: uuidSchema,
+  nonce: z.string(),
+  state: z.string(),
+  expectedRevision: z.number().int().positive(),
+  verifiedGoogleIdentity: z.object({
+    subject: z.string().min(1).max(255),
+    nonceVerified: z.literal(true),
+    googleSubjectHash: hashSchema
+  }).strict()
+}).strict();
+
 const trustedContextMarker: unique symbol = Symbol("trusted-auth-challenge-context");
-export type AuthChallengeTrustedContext = z.infer<typeof trustedContextSchema> & { readonly [trustedContextMarker]: true };
+export type AuthChallengeTrustedContext = (z.infer<typeof trustedContextSchema>
+  | z.infer<typeof bootstrapContextSchema>) & { readonly [trustedContextMarker]: true };
 
 export function createTrustedAuthChallengeContext(input: unknown): AuthChallengeTrustedContext {
   const context = trustedContextSchema.parse(input);
+  if (context.expectedInternalUid !== context.expectedFirebaseUid) {
+    throw new AuthChallengeValidationError("UID_MISMATCH");
+  }
+  return Object.freeze({ ...context, [trustedContextMarker]: true as const }) as AuthChallengeTrustedContext;
+}
+
+export function createTrustedAuthBootstrapChallengeContext(input: unknown): AuthChallengeTrustedContext {
+  const context = bootstrapContextSchema.parse(input);
   if (context.expectedInternalUid !== context.expectedFirebaseUid) {
     throw new AuthChallengeValidationError("UID_MISMATCH");
   }
@@ -125,10 +150,16 @@ export function evaluateAuthChallenge(input: {
     throw new AuthChallengeValidationError("OPERATION_MISMATCH");
   }
   if (context.authorizationId !== challenge.authorizationId) throw new AuthChallengeValidationError("AUTHORIZATION_MISMATCH");
-  if ((challenge.contextType ?? "trusted_session") !== "trusted_session") {
+  const challengeContextType = challenge.contextType ?? "trusted_session";
+  const suppliedContextType = "contextType" in context ? context.contextType : "trusted_session";
+  if (suppliedContextType !== challengeContextType) throw new AuthChallengeValidationError("CONTEXT_TYPE_MISMATCH");
+  if (challengeContextType === "trusted_session") {
+    if (!("trustedSessionId" in context) || context.trustedSessionId !== challenge.trustedSessionId) {
+      throw new AuthChallengeValidationError("SESSION_MISMATCH");
+    }
+  } else if ("trustedSessionId" in context || challenge.trustedSessionId !== undefined) {
     throw new AuthChallengeValidationError("CONTEXT_TYPE_MISMATCH");
   }
-  if (context.trustedSessionId !== challenge.trustedSessionId) throw new AuthChallengeValidationError("SESSION_MISMATCH");
   if (context.expectedRevision !== challenge.revision) throw new AuthChallengeValidationError("REVISION_CONFLICT");
   if (!verifyAuthChallengeSecret(context.nonce, challenge.nonceHash)) throw new AuthChallengeValidationError("NONCE_MISMATCH");
   if (!verifyAuthChallengeSecret(context.state, challenge.stateHash)) throw new AuthChallengeValidationError("STATE_MISMATCH");

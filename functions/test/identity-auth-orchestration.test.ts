@@ -6,6 +6,7 @@ import {
   createTrustedChallengeOrchestrationEvidence,
   createTrustedCoordinationOrchestrationEvidence,
   createTrustedGoogleOrchestrationEvidence,
+  authOrchestrationInputSchema,
   type AuthOrchestrationInput
 } from "../src/identities/identity-auth-orchestration-contracts.js";
 import { evaluateAuthOrchestration } from "../src/identities/identity-auth-orchestration-policy.js";
@@ -250,5 +251,63 @@ describe("pure identity auth orchestration policy", () => {
     const before = JSON.stringify(input);
     evaluateAuthOrchestration(input, adminUid);
     expect(JSON.stringify(input)).toBe(before);
+  });
+});
+
+describe("E5D2 context contract", () => {
+  function bootstrapInput() {
+    const base = fixture();
+    const { trustedSessionId: _trustedSessionId, ...baseInput } = base;
+    const { trustedSessionId: _challengeSessionId, ...challenge } = base.evidence.challenge!;
+    const bootstrapChallenge = createTrustedChallengeOrchestrationEvidence({ ...challenge,
+      contextType: "google_bootstrap" });
+    return { ...baseInput, contextType: "google_bootstrap" as const,
+      evidence: { ...base.evidence, challenge: bootstrapChallenge } };
+  }
+
+  it("preserves trusted_session and requires trustedSessionId", () => {
+    const valid = fixture();
+    expect(authOrchestrationInputSchema.parse(valid).contextType).toBe("trusted_session");
+    const { trustedSessionId: _session, ...missingSession } = valid;
+    expect(authOrchestrationInputSchema.safeParse(missingSession).success).toBe(false);
+  });
+
+  it("accepts a structurally valid google_bootstrap contract without trustedSessionId", () => {
+    const value = bootstrapInput();
+    expect(value).not.toHaveProperty("trustedSessionId");
+    expect(authOrchestrationInputSchema.safeParse(value).success).toBe(true);
+  });
+
+  it("rejects incompatible context and Challenge combinations", () => {
+    const valid = fixture();
+    expect(authOrchestrationInputSchema.safeParse({ ...valid, contextType: "google_bootstrap" }).success).toBe(false);
+    const bootstrap = bootstrapInput();
+    expect(authOrchestrationInputSchema.safeParse({ ...bootstrap, trustedSessionId: valid.trustedSessionId }).success)
+      .toBe(false);
+  });
+
+  it("rejects bootstrap contracts missing Challenge, authorization, or revision evidence", () => {
+    const valid = bootstrapInput();
+    expect(authOrchestrationInputSchema.safeParse({ ...valid, challengeId: undefined }).success).toBe(false);
+    expect(authOrchestrationInputSchema.safeParse({ ...valid, authorizationId: undefined }).success).toBe(false);
+    expect(authOrchestrationInputSchema.safeParse({ ...valid, expectedCoordinationRevision: undefined }).success)
+      .toBe(false);
+    expectReject({ ...valid, evidence: { ...valid.evidence, challenge: null } } as AuthOrchestrationInput,
+      "EVIDENCE_MISSING");
+    expectReject({ ...valid, expectedCoordinationRevision: 1 } as AuthOrchestrationInput, "REVISION_CONFLICT");
+  });
+
+  it("requires backend evidence markers instead of client supplied evidence data", () => {
+    const valid = fixture();
+    const clientEvidence = (value: object | null) => value === null ? null : Object.fromEntries(Object.entries(value));
+    const clientData = { ...valid, evidence: {
+      ...valid.evidence,
+      google: clientEvidence(valid.evidence.google),
+      challenge: clientEvidence(valid.evidence.challenge),
+      administrative: clientEvidence(valid.evidence.administrative),
+      coordination: clientEvidence(valid.evidence.coordination)
+    } } as AuthOrchestrationInput;
+    expect(authOrchestrationInputSchema.safeParse(clientData).success).toBe(true);
+    expect(evaluateAuthOrchestration(clientData, adminUid)).toEqual({ decision: "reject", code: "UNTRUSTED_EVIDENCE" });
   });
 });

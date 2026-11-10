@@ -8,6 +8,7 @@ const uuidSchema = z.string().uuid();
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const timestampSchema = z.instanceof(Timestamp);
 const sessionSchema = z.string().min(16).max(256).regex(/^[A-Za-z0-9._~-]+$/);
+const orchestrationContextTypeSchema = z.enum(["trusted_session", "google_bootstrap"]);
 
 export const orchestrationActionSchema = z.enum([
   "consume_challenge_and_record_google_proof",
@@ -48,7 +49,8 @@ const challengeEvidenceSchema = z.object({
   expectedFirebaseUid: uidSchema,
   expectedInternalUid: uidSchema,
   authorizationId: uuidSchema,
-  trustedSessionId: sessionSchema,
+  contextType: orchestrationContextTypeSchema.default("trusted_session"),
+  trustedSessionId: sessionSchema.optional(),
   googleSubjectHash: hashSchema,
   status: z.enum(["validated", "consumed"]),
   revision: z.number().int().positive(),
@@ -56,6 +58,12 @@ const challengeEvidenceSchema = z.object({
   consumedAt: timestampSchema.nullable(),
   validUntil: timestampSchema
 }).strict().superRefine((value, context) => {
+  if (value.contextType === "trusted_session" && !value.trustedSessionId) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "trusted_session requiere sesión" });
+  }
+  if (value.contextType === "google_bootstrap" && value.trustedSessionId !== undefined) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "google_bootstrap no admite sesión" });
+  }
   if ((value.status === "consumed") !== (value.consumedAt !== null)) {
     context.addIssue({ code: "custom", path: ["consumedAt"], message: "El consumo requiere sello inequívoco" });
   }
@@ -148,13 +156,14 @@ export function createTrustedCoordinationOrchestrationEvidence(input: unknown): 
 }
 
 export const authOrchestrationInputSchema = z.object({
+  contextType: orchestrationContextTypeSchema.default("trusted_session"),
   operationId: uuidSchema,
   expectedFirebaseUid: uidSchema,
   expectedInternalUid: uidSchema,
   googleSubjectHash: hashSchema,
   challengeId: uuidSchema,
   authorizationId: uuidSchema,
-  trustedSessionId: sessionSchema,
+  trustedSessionId: sessionSchema.optional(),
   idempotencyKey: uuidSchema,
   requestHash: hashSchema,
   expectedCoordinationState: authCoordinationStateSchema,
@@ -170,7 +179,19 @@ export const authOrchestrationInputSchema = z.object({
   }).strict(),
   activationRequested: z.literal(false),
   version: z.literal(1)
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (value.contextType === "trusted_session" && !value.trustedSessionId) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "trusted_session requiere sesión" });
+  }
+  if (value.contextType === "google_bootstrap" && value.trustedSessionId !== undefined) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "google_bootstrap no admite sesión" });
+  }
+  const challengeContextType = value.evidence.challenge?.contextType ?? "trusted_session";
+  if (value.evidence.challenge && challengeContextType !== value.contextType) {
+    context.addIssue({ code: "custom", path: ["evidence", "challenge", "contextType"],
+      message: "El contexto del Challenge debe coincidir con la orquestación" });
+  }
+});
 
 export type AuthOrchestrationInput = Omit<z.infer<typeof authOrchestrationInputSchema>, "evidence"> & {
   evidence: {

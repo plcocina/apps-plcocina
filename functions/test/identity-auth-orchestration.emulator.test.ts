@@ -103,6 +103,19 @@ async function setup() {
   return { uid, subject, authorization, reservation, coordinationService, challengeService, challenge, request };
 }
 
+async function setupBootstrap() {
+  const value = await setup();
+  const challengeRef = db.collection("identityAuthChallenges").doc(value.request.challengeId);
+  const storedChallenge = (await challengeRef.get()).data()!;
+  const { trustedSessionId: _trustedSessionId, ...bootstrapChallenge } = storedChallenge;
+  await challengeRef.set({ ...bootstrapChallenge, contextType: "google_bootstrap" });
+  await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).update({
+    state: "pending", stateChangedAt: null
+  });
+  const { trustedSessionId: _requestSessionId, ...bootstrapRequest } = value.request;
+  return { ...value, request: { ...bootstrapRequest, contextType: "google_bootstrap" as const } };
+}
+
 function service(value: Setup, subject = value.subject) {
   return new IdentityAuthOrchestrationPersistenceService(db, {
     verify: async () => ({ issuer: "https://accounts.google.com", audience: "approved-client",
@@ -137,6 +150,144 @@ describe("persistent atomic auth orchestration", () => {
     expect(stored.coordination).toMatchObject({ state: "google_proof_verified", revision: 3,
       localActivationStatus: "linked_pending_activation", localAuthDisabled: true });
     expect(stored.audits.size).toBe(4);
+  });
+
+  it("rejects a bootstrap Challenge through the traditional service without writes", async () => {
+    const value = await setup();
+    const challengeRef = db.collection("identityAuthChallenges").doc(value.request.challengeId);
+    const originalChallenge = (await challengeRef.get()).data()!;
+    const { trustedSessionId: _trustedSessionId, ...bootstrapChallenge } = originalChallenge;
+    await challengeRef.set({ ...bootstrapChallenge, contextType: "google_bootstrap" });
+    const before = await persisted(value);
+    const beforeIdempotency = await db.collection("identityAuthCoordinationIdempotency")
+      .doc(value.request.idempotencyKey).get();
+
+    await expect(service(value).verifyConsumeAndRecord(value.request)).rejects.toMatchObject({
+      code: "CONTEXT_TYPE_MISMATCH"
+    });
+
+    const after = await persisted(value);
+    const afterIdempotency = await db.collection("identityAuthCoordinationIdempotency")
+      .doc(value.request.idempotencyKey).get();
+    expect(after.challenge).toEqual(before.challenge);
+    expect(after.coordination).toEqual(before.coordination);
+    expect(after.audits.size).toBe(before.audits.size);
+    expect(afterIdempotency.exists).toBe(beforeIdempotency.exists);
+  });
+
+  it("consumes one valid Google bootstrap challenge without a Firebase session or activation", async () => {
+    const value = await setupBootstrap();
+    const beforeProfile = (await db.collection("users").doc(value.uid).get()).data();
+    const beforeUsers = await db.collection("users").get();
+    expect(await service(value).verifyConsumeAndRecord(value.request)).toMatchObject({
+      replayed: false, state: "google_proof_verified", coordinationRevision: 3, challengeRevision: 2,
+      automaticActivation: false
+    });
+    const stored = await persisted(value);
+    expect(stored.challenge).toMatchObject({ contextType: "google_bootstrap", state: "consumed", revision: 2 });
+    expect(stored.challenge).not.toHaveProperty("trustedSessionId");
+    expect(stored.coordination).toMatchObject({ state: "google_proof_verified", revision: 3,
+      localActivationStatus: "linked_pending_activation", localAuthDisabled: true,
+      evidence: { firebaseSession: null, firebaseProvider: null } });
+    expect((await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).get()).data())
+      .toMatchObject({ state: "pending" });
+    expect((await db.collection("users").doc(value.uid).get()).data()).toEqual(beforeProfile);
+    expect((await db.collection("users").get()).size).toBe(beforeUsers.size);
+    expect((await db.collection("accessGrants").where("userId", "==", value.uid).get()).empty).toBe(true);
+    expect(stored.audits.size).toBe(4);
+  });
+
+  it("rejects an invalid Google token before writing bootstrap state", async () => {
+    const value = await setupBootstrap();
+    const before = await persisted(value);
+    const invalidTokenService = new IdentityAuthOrchestrationPersistenceService(db, {
+      verify: async () => { throw new Error("GOOGLE_TOKEN_INVALID"); }
+    }, pepper, adminUid, () => orchestrationTime);
+    await expect(invalidTokenService.verifyConsumeAndRecord(value.request)).rejects.toThrow("GOOGLE_TOKEN_INVALID");
+    const after = await persisted(value);
+    expect(after.challenge).toEqual(before.challenge);
+    expect(after.coordination).toEqual(before.coordination);
+    expect(after.audits.size).toBe(before.audits.size);
+  });
+
+  it("rejects a conflicting verified Google subject before bootstrap writes", async () => {
+    const value = await setupBootstrap();
+    const before = await persisted(value);
+    await rejected(service(value, `different-${randomUUID()}`).verifyConsumeAndRecord(value.request),
+      "COORDINATION_CONTEXT_MISMATCH");
+    const after = await persisted(value);
+    expect(after.challenge).toEqual(before.challenge);
+    expect(after.coordination).toEqual(before.coordination);
+    expect(after.audits.size).toBe(before.audits.size);
+  });
+
+  it.each([
+    ["revoked", "AUTHORIZATION_REVOKED"],
+    ["consumed", "AUTHORIZATION_CONSUMED"]
+  ] as const)("rejects a %s bootstrap authorization without writes", async (state, code) => {
+    const value = await setupBootstrap();
+    await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).update({
+      state, stateChangedAt: orchestrationTime
+    });
+    const before = await persisted(value);
+    await rejected(service(value).verifyConsumeAndRecord(value.request), code);
+    const after = await persisted(value);
+    expect(after.challenge).toEqual(before.challenge);
+    expect(after.coordination).toEqual(before.coordination);
+    expect(after.audits.size).toBe(before.audits.size);
+  });
+
+  it.each([
+    ["nonce", { nonce: Buffer.alloc(32, 0xa1).toString("base64url") }, "NONCE_MISMATCH"],
+    ["state", { state: Buffer.alloc(32, 0xb2).toString("base64url") }, "STATE_MISMATCH"]
+  ] as const)("rejects a bootstrap with an incorrect %s without writes", async (_label, patch, code) => {
+    const value = await setupBootstrap();
+    const before = await persisted(value);
+    await expect(service(value).verifyConsumeAndRecord({ ...value.request, ...patch })).rejects.toMatchObject({ code });
+    const after = await persisted(value);
+    expect(after.challenge).toEqual(before.challenge);
+    expect(after.coordination).toEqual(before.coordination);
+    expect(after.audits.size).toBe(before.audits.size);
+  });
+
+  it("replays a bootstrap idempotently without consuming its Challenge twice", async () => {
+    const value = await setupBootstrap();
+    await service(value).verifyConsumeAndRecord(value.request);
+    const replay = await service(value).verifyConsumeAndRecord(value.request);
+    expect(replay).toMatchObject({ replayed: true, challengeRevision: 2, coordinationRevision: 3,
+      challengeConsumedAgain: false });
+    expect((await persisted(value)).challenge).toMatchObject({ state: "consumed", revision: 2 });
+  });
+
+  it("allows only one incompatible concurrent bootstrap consumption", async () => {
+    const value = await setupBootstrap();
+    const conflict = { ...value.request, idempotencyKey: randomUUID(), verificationId: randomUUID() };
+    const results = await Promise.allSettled([service(value).verifyConsumeAndRecord(value.request),
+      service(value).verifyConsumeAndRecord(conflict)]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect((await persisted(value)).challenge).toMatchObject({ state: "consumed", revision: 2 });
+    expect((await persisted(value)).coordination).toMatchObject({ revision: 3 });
+  });
+
+  it("rejects stale bootstrap coordination and Challenge revisions", async () => {
+    const value = await setupBootstrap();
+    await rejected(service(value).verifyConsumeAndRecord({ ...value.request, expectedCoordinationRevision: 1 }),
+      "REVISION_CONFLICT");
+    await rejected(service(value).verifyConsumeAndRecord({ ...value.request, expectedChallengeRevision: 2 }),
+      "REVISION_CONFLICT");
+    expect((await persisted(value)).challenge).toMatchObject({ state: "issued", revision: 1 });
+    expect((await persisted(value)).coordination).toMatchObject({ state: "challenge_issued", revision: 2 });
+  });
+
+  it("rejects an expired bootstrap Challenge without writes", async () => {
+    const value = await setupBootstrap();
+    await db.collection("identityAuthChallenges").doc(value.request.challengeId).update({ expiresAt: orchestrationTime });
+    const before = await persisted(value);
+    await rejected(service(value).verifyConsumeAndRecord(value.request), "CHALLENGE_EXPIRED");
+    const after = await persisted(value);
+    expect(after.challenge).toEqual(before.challenge);
+    expect(after.coordination).toEqual(before.coordination);
+    expect(after.audits.size).toBe(before.audits.size);
   });
 
   it("coalesces two equivalent simultaneous orchestrations", async () => {
