@@ -50,6 +50,11 @@ function lookup(created: AuthChallengeCreationResult, input: ReturnType<typeof f
   };
 }
 
+function bootstrapLookup(created: AuthChallengeCreationResult, input: ReturnType<typeof fixture>) {
+  const { trustedSessionId: _trustedSessionId, ...traditional } = lookup(created, input);
+  return { ...traditional, contextType: "google_bootstrap" as const };
+}
+
 function context(created: AuthChallengeCreationResult, input: ReturnType<typeof fixture>,
   overrides: Record<string, unknown> = {}) {
   return createTrustedAuthChallengeContext({
@@ -84,6 +89,95 @@ async function rejected(work: Promise<unknown>, code: string) {
 }
 
 describe("persistent transactional auth challenges", () => {
+  it("creates Google bootstrap challenges with a valid E4B2 authorization and backend-only secrets", async () => {
+    const input = fixture({ googleSubjectHash: "a".repeat(64), trustedSessionId: undefined });
+    await authorization(input);
+    const created = await service().create({ ...input, contextType: "google_bootstrap",
+      authorizationBinding: { operationId: input.coordinationOperationId, expectedRevision: 2 } });
+    const stored = (await db.collection("identityAuthChallenges").doc(created.document.challengeId).get()).data();
+    expect(created.document).toMatchObject({ contextType: "google_bootstrap", authorizationId: input.authorizationId,
+      googleSubjectHash: input.googleSubjectHash, state: "issued", revision: 1 });
+    expect(created.oneTimeSecrets.nonce).not.toBe(created.oneTimeSecrets.state);
+    expect(stored).toMatchObject({ nonceHash: hashAuthChallengeSecret(created.oneTimeSecrets.nonce),
+      stateHash: hashAuthChallengeSecret(created.oneTimeSecrets.state) });
+    expect(stored).not.toHaveProperty("trustedSessionId");
+    expect(stored).not.toHaveProperty("nonce");
+    expect(stored).not.toHaveProperty("state", created.oneTimeSecrets.state);
+    expect(JSON.stringify(stored)).not.toContain(created.oneTimeSecrets.nonce);
+    expect(JSON.stringify(stored)).not.toContain(created.oneTimeSecrets.state);
+  });
+
+  it("rejects Google bootstrap authorization failures and missing bindings", async () => {
+    const input = fixture({ googleSubjectHash: "a".repeat(64), trustedSessionId: undefined });
+    for (const [label, overrides, code] of [
+      ["missing", undefined, "AUTHORIZATION_NOT_FOUND"],
+      ["expired", { state: "expired", stateChangedAt: Timestamp.fromMillis(initialTime) }, "AUTHORIZATION_EXPIRED"],
+      ["revoked", { state: "revoked", stateChangedAt: Timestamp.fromMillis(initialTime) }, "AUTHORIZATION_REVOKED"],
+      ["wrong subject", { googleSubjectHash: "b".repeat(64) }, "AUTHORIZATION_MISMATCH"],
+      ["wrong revision", { expectedRevision: 9 }, "AUTHORIZATION_MISMATCH"]
+    ] as const) {
+      const attempt = fixture({ googleSubjectHash: input.googleSubjectHash, trustedSessionId: undefined });
+      if (overrides !== undefined) await authorization(attempt, overrides);
+      const before = (await db.collection("identityAuthChallenges").get()).size;
+      await rejected(service().create({ ...attempt, contextType: "google_bootstrap",
+        authorizationBinding: { operationId: attempt.coordinationOperationId, expectedRevision: 2 } }), code);
+      expect((await db.collection("identityAuthChallenges").get()).size, label).toBe(before);
+    }
+    await expect(service().create({ ...input, contextType: "google_bootstrap" })).rejects.toThrow();
+  });
+
+  it("rejects trusted-session lookups and consumption for Google bootstrap challenges", async () => {
+    const input = fixture({ googleSubjectHash: "a".repeat(64), trustedSessionId: undefined });
+    await authorization(input);
+    const created = await service().create({ ...input, contextType: "google_bootstrap",
+      authorizationBinding: { operationId: input.coordinationOperationId, expectedRevision: 2 } });
+    expect(await service().get(bootstrapLookup(created, input))).toEqual(created.document);
+    await rejected(service().get({ ...lookup(created, input), trustedSessionId: `session-${randomUUID()}` }), "CONTEXT_MISMATCH");
+    await rejected(service().consume({ trustedOperatorUid: adminUid, challengeId: created.document.challengeId,
+      context: context(created, input, { trustedSessionId: `session-${randomUUID()}` }) }), "CONTEXT_TYPE_MISMATCH");
+    expect(await service().get(bootstrapLookup(created, input))).toMatchObject({ state: "issued", revision: 1 });
+  });
+
+  it("expires and revises Google bootstrap challenges through the bound bootstrap context", async () => {
+    const input = fixture({ googleSubjectHash: "a".repeat(64), trustedSessionId: undefined, lifetimeMs: 1_000 });
+    await authorization(input);
+    const created = await service().create({ ...input, contextType: "google_bootstrap",
+      authorizationBinding: { operationId: input.coordinationOperationId, expectedRevision: 2 } });
+    const expired = await service(initialTime + 1_000).expire({ ...bootstrapLookup(created, input), expectedRevision: 1 });
+    expect(expired).toMatchObject({ contextType: "google_bootstrap", state: "expired", revision: 2 });
+    expect(await service(initialTime + 1_001).expire({ ...bootstrapLookup(created, input), expectedRevision: 1 }))
+      .toMatchObject({ state: "expired", revision: 2 });
+    await rejected(service(initialTime + 1_001).consume({ trustedOperatorUid: adminUid,
+      challengeId: created.document.challengeId,
+      context: context(created, input, { trustedSessionId: `session-${randomUUID()}` }) }), "CHALLENGE_EXPIRED");
+  });
+
+  it("keeps pre-contextType trusted-session documents readable and consumable", async () => {
+    const input = fixture();
+    const created = await service().create(input);
+    const reference = db.collection("identityAuthChallenges").doc(created.document.challengeId);
+    const { contextType: _contextType, ...legacy } = created.document;
+    await reference.set(legacy);
+    expect(await service().get(lookup(created, input))).toMatchObject({ challengeId: created.document.challengeId,
+      state: "issued", revision: 1 });
+    expect(await service(initialTime + 1_000).consume({ trustedOperatorUid: adminUid,
+      challengeId: created.document.challengeId, context: context(created, input) }))
+      .toMatchObject({ state: "consumed", revision: 2 });
+  });
+
+  it("does not activate an identity, issue a Firebase session, or create new grants for bootstrap", async () => {
+    const input = fixture({ googleSubjectHash: "a".repeat(64), trustedSessionId: undefined });
+    await authorization(input);
+    const created = await service().create({ ...input, contextType: "google_bootstrap",
+      authorizationBinding: { operationId: input.coordinationOperationId, expectedRevision: 2 } });
+    const snapshot = await db.collection("identityAuthChallenges").doc(created.document.challengeId).get();
+    expect(snapshot.data()).not.toHaveProperty("trustedSessionId");
+    expect((await db.collection("accessGrants").where("userId", "==", input.expectedFirebaseUid).get()).empty).toBe(true);
+    expect((await db.collection("users").doc(input.expectedFirebaseUid).get()).exists).toBe(false);
+    expect((await db.collection("identityLinks").where("firebaseUid", "==", input.expectedFirebaseUid).get()).empty).toBe(true);
+    expect((await db.collection("auditEvents").where("resourceId", "==", input.expectedFirebaseUid).get()).empty).toBe(true);
+  });
+
   it("creates a challenge when its E4B2 authorization is valid", async () => {
     const input = fixture({ googleSubjectHash: "a".repeat(64) });
     await authorization(input);

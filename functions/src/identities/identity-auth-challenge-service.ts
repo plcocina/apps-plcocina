@@ -26,10 +26,19 @@ const createInputSchema = z.object({
   coordinationOperationId: uuidSchema,
   authorizationId: uuidSchema,
   googleSubjectHash: hashSchema.nullable(),
-  trustedSessionId: trustedSessionIdSchema,
+  contextType: z.enum(["trusted_session", "google_bootstrap"]).default("trusted_session"),
+  trustedSessionId: trustedSessionIdSchema.optional(),
   authorizationBinding: z.object({ operationId: uuidSchema, expectedRevision: z.number().int().nonnegative() }).strict().optional(),
   lifetimeMs: z.number().int().positive().max(MAX_CHALLENGE_LIFETIME_MS)
-}).strict();
+}).strict().superRefine((input, context) => {
+  if (input.contextType === "trusted_session" && !input.trustedSessionId) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "trusted_session requiere trustedSessionId" });
+  }
+  if (input.contextType === "google_bootstrap" && (input.trustedSessionId !== undefined
+    || !input.authorizationBinding || !input.googleSubjectHash)) {
+    context.addIssue({ code: "custom", path: ["authorizationBinding"], message: "google_bootstrap requiere autorización y subject, sin sesión" });
+  }
+});
 
 const lookupInputSchema = z.object({
   trustedOperatorUid: uidSchema,
@@ -38,9 +47,18 @@ const lookupInputSchema = z.object({
   expectedFirebaseUid: uidSchema,
   coordinationOperationId: uuidSchema,
   authorizationId: uuidSchema,
-  trustedSessionId: trustedSessionIdSchema,
+  contextType: z.enum(["trusted_session", "google_bootstrap"]).optional(),
+  trustedSessionId: trustedSessionIdSchema.optional(),
   googleSubjectHash: hashSchema.nullable()
-}).strict();
+}).strict().superRefine((input, context) => {
+  const contextType = input.contextType ?? "trusted_session";
+  if (contextType === "trusted_session" && !input.trustedSessionId) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "trusted_session requiere trustedSessionId" });
+  }
+  if (contextType === "google_bootstrap" && input.trustedSessionId !== undefined) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "google_bootstrap no admite sesión" });
+  }
+});
 
 export type AuthChallengeCreateInput = z.input<typeof createInputSchema>;
 export type AuthChallengeLookupInput = z.input<typeof lookupInputSchema>;
@@ -72,7 +90,11 @@ function assertLookupContext(document: AuthChallengeDocument, input: z.output<ty
     || document.expectedFirebaseUid !== input.expectedFirebaseUid
     || document.coordinationOperationId !== input.coordinationOperationId
     || document.authorizationId !== input.authorizationId
-    || document.trustedSessionId !== input.trustedSessionId
+    || (document.contextType ?? "trusted_session") !== (input.contextType ?? "trusted_session")
+    || (document.contextType ?? "trusted_session") === "trusted_session"
+      && document.trustedSessionId !== input.trustedSessionId
+    || (document.contextType ?? "trusted_session") === "google_bootstrap"
+      && (document.trustedSessionId !== undefined || input.trustedSessionId !== undefined)
     || document.googleSubjectHash !== input.googleSubjectHash) {
     throw new AuthChallengePersistenceError("CONTEXT_MISMATCH");
   }
@@ -140,7 +162,8 @@ export class AuthChallengePersistenceService {
       coordinationOperationId: value.coordinationOperationId,
       authorizationId: value.authorizationId,
       googleSubjectHash: value.googleSubjectHash,
-      trustedSessionId: value.trustedSessionId,
+      contextType: value.contextType,
+      ...(value.trustedSessionId === undefined ? {} : { trustedSessionId: value.trustedSessionId }),
       nonceHash: hashAuthChallengeSecret(secrets.nonce),
       stateHash: hashAuthChallengeSecret(secrets.state),
       issuedAt,

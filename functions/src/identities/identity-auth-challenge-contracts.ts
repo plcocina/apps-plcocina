@@ -11,6 +11,7 @@ const trustedSessionIdSchema = z.string().min(16).max(256).regex(/^[A-Za-z0-9._~
 const MAX_CHALLENGE_LIFETIME_MS = 15 * 60 * 1000;
 
 export const authChallengeStateSchema = z.enum(["issued", "consumed", "expired", "revoked"]);
+export const authChallengeContextTypeSchema = z.enum(["trusted_session", "google_bootstrap"]);
 
 export const authChallengeDocumentSchema = z.object({
   challengeId: uuidSchema,
@@ -19,7 +20,8 @@ export const authChallengeDocumentSchema = z.object({
   coordinationOperationId: uuidSchema,
   authorizationId: uuidSchema,
   googleSubjectHash: hashSchema.nullable(),
-  trustedSessionId: trustedSessionIdSchema,
+  contextType: authChallengeContextTypeSchema.optional(),
+  trustedSessionId: trustedSessionIdSchema.optional(),
   nonceHash: hashSchema,
   stateHash: hashSchema,
   issuedAt: timestampSchema,
@@ -29,6 +31,13 @@ export const authChallengeDocumentSchema = z.object({
   revision: z.number().int().positive(),
   version: z.literal(1)
 }).strict().superRefine((challenge, context) => {
+  const contextType = challenge.contextType ?? "trusted_session";
+  if (contextType === "trusted_session" && !challenge.trustedSessionId) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "trusted_session requiere sesión" });
+  }
+  if (contextType === "google_bootstrap" && challenge.trustedSessionId !== undefined) {
+    context.addIssue({ code: "custom", path: ["trustedSessionId"], message: "google_bootstrap no admite sesión Firebase" });
+  }
   if (challenge.expectedInternalUid !== challenge.expectedFirebaseUid) {
     context.addIssue({ code: "custom", path: ["expectedFirebaseUid"], message: "Los UID interno y Firebase deben coincidir" });
   }
@@ -53,6 +62,7 @@ const trustedContextSchema = z.object({
   expectedFirebaseUid: uidSchema,
   coordinationOperationId: uuidSchema,
   authorizationId: uuidSchema,
+  contextType: z.literal("trusted_session").optional(),
   trustedSessionId: trustedSessionIdSchema,
   nonce: z.string(),
   state: z.string(),
@@ -78,7 +88,7 @@ export function createTrustedAuthChallengeContext(input: unknown): AuthChallenge
 export type AuthChallengeValidationErrorCode = "UNTRUSTED_CONTEXT" | "CHALLENGE_EXPIRED" | "CHALLENGE_REVOKED"
   | "CHALLENGE_CONSUMED" | "REPLAY_DETECTED" | "UID_MISMATCH" | "OPERATION_MISMATCH"
   | "AUTHORIZATION_MISMATCH" | "SESSION_MISMATCH" | "NONCE_MISMATCH" | "STATE_MISMATCH"
-  | "REVISION_CONFLICT" | "SUBJECT_MISMATCH" | "GOOGLE_PROOF_REQUIRED";
+  | "REVISION_CONFLICT" | "SUBJECT_MISMATCH" | "GOOGLE_PROOF_REQUIRED" | "CONTEXT_TYPE_MISMATCH";
 
 export class AuthChallengeValidationError extends Error {
   constructor(readonly code: AuthChallengeValidationErrorCode) {
@@ -115,6 +125,9 @@ export function evaluateAuthChallenge(input: {
     throw new AuthChallengeValidationError("OPERATION_MISMATCH");
   }
   if (context.authorizationId !== challenge.authorizationId) throw new AuthChallengeValidationError("AUTHORIZATION_MISMATCH");
+  if ((challenge.contextType ?? "trusted_session") !== "trusted_session") {
+    throw new AuthChallengeValidationError("CONTEXT_TYPE_MISMATCH");
+  }
   if (context.trustedSessionId !== challenge.trustedSessionId) throw new AuthChallengeValidationError("SESSION_MISMATCH");
   if (context.expectedRevision !== challenge.revision) throw new AuthChallengeValidationError("REVISION_CONFLICT");
   if (!verifyAuthChallengeSecret(context.nonce, challenge.nonceHash)) throw new AuthChallengeValidationError("NONCE_MISMATCH");
