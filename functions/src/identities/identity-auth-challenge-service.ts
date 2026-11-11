@@ -12,6 +12,7 @@ import {
   type AuthChallengeSecrets
 } from "./identity-auth-challenge-crypto.js";
 import { readValidIdentityLinkAuthorization } from "./identity-linking-service.js";
+import { googleWorkspaceUserV21DocumentSchema } from "./identity-models.js";
 
 const uidSchema = z.string().min(1).max(128).refine((value) => !value.includes("/"));
 const uuidSchema = z.string().uuid();
@@ -28,6 +29,8 @@ const createInputSchema = z.object({
   googleSubjectHash: hashSchema.nullable(),
   contextType: z.enum(["trusted_session", "google_bootstrap"]).default("trusted_session"),
   trustedSessionId: trustedSessionIdSchema.optional(),
+  issuanceIdempotencyKey: uuidSchema.optional(),
+  expectedProfileRevision: z.number().int().positive().optional(),
   authorizationBinding: z.object({ operationId: uuidSchema, expectedRevision: z.number().int().nonnegative() }).strict().optional(),
   lifetimeMs: z.number().int().positive().max(MAX_CHALLENGE_LIFETIME_MS)
 }).strict().superRefine((input, context) => {
@@ -69,7 +72,7 @@ export type AuthChallengeCreationResult = Readonly<{
 
 export type AuthChallengePersistenceErrorCode = "TRUSTED_CONTEXT_MISMATCH" | "SUPER_ADMIN_FORBIDDEN"
   | "UID_MISMATCH" | "CHALLENGE_NOT_FOUND" | "CHALLENGE_ID_CONFLICT" | "CHALLENGE_MALFORMED"
-  | "CONTEXT_MISMATCH" | "REVISION_CONFLICT" | "REPLAY_DETECTED" | "CHALLENGE_REVOKED"
+  | "CONTEXT_MISMATCH" | "PROFILE_CONTEXT_MISMATCH" | "REVISION_CONFLICT" | "REPLAY_DETECTED" | "CHALLENGE_REVOKED"
   | "CHALLENGE_EXPIRED" | "CHALLENGE_NOT_EXPIRED";
 
 export class AuthChallengePersistenceError extends Error {
@@ -164,6 +167,7 @@ export class AuthChallengePersistenceService {
       googleSubjectHash: value.googleSubjectHash,
       contextType: value.contextType,
       ...(value.trustedSessionId === undefined ? {} : { trustedSessionId: value.trustedSessionId }),
+      ...(value.issuanceIdempotencyKey === undefined ? {} : { issuanceIdempotencyKey: value.issuanceIdempotencyKey }),
       nonceHash: hashAuthChallengeSecret(secrets.nonce),
       stateHash: hashAuthChallengeSecret(secrets.state),
       issuedAt,
@@ -174,23 +178,76 @@ export class AuthChallengePersistenceService {
       version: 1
     });
     const reference = this.db.collection("identityAuthChallenges").doc(document.challengeId);
-    await this.db.runTransaction(async (transaction) => {
-      if ((await transaction.get(reference)).exists) {
-        throw new AuthChallengePersistenceError("CHALLENGE_ID_CONFLICT");
+    const creation = await this.db.runTransaction(async (transaction) => {
+      const challengeSnapshot = await transaction.get(reference);
+      if (challengeSnapshot.exists) {
+        const existing = authChallengeDocumentSchema.safeParse(challengeSnapshot.data());
+        const isIdempotentBootstrapReplay = value.contextType === "google_bootstrap"
+          && value.issuanceIdempotencyKey !== undefined
+          && existing.success
+          && existing.data.challengeId === document.challengeId
+          && existing.data.contextType === "google_bootstrap"
+          && existing.data.trustedSessionId === undefined
+          && existing.data.issuanceIdempotencyKey === value.issuanceIdempotencyKey
+          && existing.data.expectedInternalUid === value.expectedInternalUid
+          && existing.data.expectedFirebaseUid === value.expectedFirebaseUid
+          && existing.data.coordinationOperationId === value.coordinationOperationId
+          && existing.data.authorizationId === value.authorizationId
+          && existing.data.googleSubjectHash === value.googleSubjectHash
+          && existing.data.nonceHash === document.nonceHash
+          && existing.data.stateHash === document.stateHash
+          && existing.data.state === "issued"
+          && this.now().toMillis() < existing.data.expiresAt.toMillis();
+        if (!isIdempotentBootstrapReplay || !existing.success) {
+          throw new AuthChallengePersistenceError("CHALLENGE_ID_CONFLICT");
+        }
+        await this.validateBootstrapBinding({ transaction, value });
+        return existing.data;
       }
       if (value.authorizationBinding) {
-        await readValidIdentityLinkAuthorization({
-          db: this.db,
-          transaction,
+        const authorization = await readValidIdentityLinkAuthorization({ db: this.db, transaction,
           authorizationId: value.authorizationId,
           expected: { operationId: value.authorizationBinding.operationId, targetUid: value.expectedFirebaseUid,
             googleSubjectHash: value.googleSubjectHash ?? "", expectedRevision: value.authorizationBinding.expectedRevision },
-          now: issuedAt
-        });
+          now: issuedAt });
+        if (authorization.authorizedByUid !== value.trustedOperatorUid) {
+          throw new AuthChallengePersistenceError("TRUSTED_CONTEXT_MISMATCH");
+        }
       }
+      await this.validateBootstrapProfile({ transaction, value });
       transaction.create(reference, document);
+      return document;
     });
-    return Object.freeze({ document, oneTimeSecrets: Object.freeze({ ...secrets }) });
+    return Object.freeze({ document: creation, oneTimeSecrets: Object.freeze({ ...secrets }) });
+  }
+
+  private async validateBootstrapBinding(input: {
+    transaction: Transaction;
+    value: z.output<typeof createInputSchema>;
+  }): Promise<void> {
+    if (input.value.contextType !== "google_bootstrap" || !input.value.authorizationBinding) return;
+    const authorization = await readValidIdentityLinkAuthorization({ db: this.db, transaction: input.transaction,
+      authorizationId: input.value.authorizationId,
+      expected: { operationId: input.value.authorizationBinding.operationId,
+        targetUid: input.value.expectedFirebaseUid, googleSubjectHash: input.value.googleSubjectHash ?? "",
+        expectedRevision: input.value.authorizationBinding.expectedRevision }, now: this.now() });
+    if (authorization.authorizedByUid !== input.value.trustedOperatorUid) {
+      throw new AuthChallengePersistenceError("TRUSTED_CONTEXT_MISMATCH");
+    }
+    await this.validateBootstrapProfile(input);
+  }
+
+  private async validateBootstrapProfile(input: {
+    transaction: Transaction;
+    value: z.output<typeof createInputSchema>;
+  }): Promise<void> {
+    if (input.value.contextType !== "google_bootstrap" || input.value.expectedProfileRevision === undefined) return;
+    const snapshot = await input.transaction.get(this.db.collection("users").doc(input.value.expectedFirebaseUid));
+    const profile = googleWorkspaceUserV21DocumentSchema.safeParse(snapshot.data());
+    if (!snapshot.exists || !profile.success || profile.data.uid !== input.value.expectedFirebaseUid
+      || profile.data.revision !== input.value.expectedProfileRevision) {
+      throw new AuthChallengePersistenceError("PROFILE_CONTEXT_MISMATCH");
+    }
   }
 
   async get(input: AuthChallengeLookupInput): Promise<AuthChallengeDocument> {

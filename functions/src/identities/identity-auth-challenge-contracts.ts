@@ -22,6 +22,7 @@ export const authChallengeDocumentSchema = z.object({
   googleSubjectHash: hashSchema.nullable(),
   contextType: authChallengeContextTypeSchema.optional(),
   trustedSessionId: trustedSessionIdSchema.optional(),
+  issuanceIdempotencyKey: uuidSchema.optional(),
   nonceHash: hashSchema,
   stateHash: hashSchema,
   issuedAt: timestampSchema,

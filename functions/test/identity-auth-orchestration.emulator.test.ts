@@ -3,6 +3,7 @@ import { deleteApp, initializeApp } from "firebase-admin/app";
 import { Timestamp, getFirestore, type Firestore } from "firebase-admin/firestore";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTrustedAuthChallengeContext } from "../src/identities/identity-auth-challenge-contracts.js";
+import { hashAuthChallengeSecret } from "../src/identities/identity-auth-challenge-crypto.js";
 import { AuthChallengePersistenceService } from "../src/identities/identity-auth-challenge-service.js";
 import { createTrustedAuthCoordinationEvent } from "../src/identities/identity-auth-coordination-contracts.js";
 import { AuthCoordinationPersistenceService } from "../src/identities/identity-auth-coordination-service.js";
@@ -10,6 +11,7 @@ import { IdentityAuthOrchestrationPersistenceService,
   type AuthOrchestrationPersistenceRequest } from "../src/identities/identity-auth-orchestration-service.js";
 import { GoogleIdentityLinkingService } from "../src/identities/identity-linking-service.js";
 import { IdentityReservationService } from "../src/identities/identity-reservation-service.js";
+import { GoogleBootstrapChallengeCoordinator } from "../src/identities/identity-google-bootstrap-challenge-coordinator.js";
 
 let app: ReturnType<typeof initializeApp>;
 let db: Firestore;
@@ -114,6 +116,35 @@ async function setupBootstrap() {
   });
   const { trustedSessionId: _requestSessionId, ...bootstrapRequest } = value.request;
   return { ...value, request: { ...bootstrapRequest, contextType: "google_bootstrap" as const } };
+}
+
+async function setupBootstrapIssuance() {
+  const value = await setup();
+  const coordinationRef = db.collection("identityAuthCoordinations").doc(value.request.operationId);
+  const coordination = (await coordinationRef.get()).data()!;
+  const previousEventKey = coordination.lastEvent?.idempotencyKey as string | undefined;
+  await db.collection("identityAuthChallenges").doc(value.request.challengeId).delete();
+  if (previousEventKey) {
+    await db.collection("identityAuthCoordinationIdempotency").doc(previousEventKey).delete();
+    await db.collection("auditEvents").doc(`auth-coordination-${value.request.operationId}-2`).delete();
+  }
+  await coordinationRef.update({ state: "not_started", challengeId: null, "evidence.challenge": null,
+    revision: 1, lastEvent: null, updatedAt: clock });
+  const locks = await db.collection("identityAuthCoordinationLocks").where("operationId", "==", value.request.operationId).get();
+  await Promise.all(locks.docs.map((document) => document.ref.update({ state: "not_started", revision: 1, updatedAt: clock })));
+  await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).update({
+    state: "pending", stateChangedAt: null
+  });
+  return value;
+}
+
+function bootstrapCoordinator() {
+  return new GoogleBootstrapChallengeCoordinator(db, adminUid, Buffer.alloc(32, 0x4c), () => orchestrationTime);
+}
+
+function backendAdminPrincipal() {
+  return { uid: adminUid, email: "bootstrap-admin@plcocina.test", authTime: clock.seconds,
+    issuedAt: clock.seconds, superAdmin: true as const };
 }
 
 function service(value: Setup, subject = value.subject) {
@@ -448,5 +479,123 @@ describe("persistent atomic auth orchestration", () => {
     expect((await db.collection("accessGrants").where("userId", "==", value.uid).get()).empty).toBe(true);
     expect((await persisted(value)).coordination).toMatchObject({ localActivationStatus: "linked_pending_activation",
       localAuthDisabled: true });
+  });
+});
+
+describe("B4-A internal Google bootstrap Challenge coordinator", () => {
+  async function issue(value: Setup, idempotencyKey = randomUUID()) {
+    return bootstrapCoordinator().issue({ principal: backendAdminPrincipal(),
+      authorizationId: value.request.authorizationId, idempotencyKey, lifetimeMs: 300_000 });
+  }
+
+  async function unchanged(value: Setup, before: { coordination: unknown; challenges: number; audits: number }) {
+    expect((await db.collection("identityAuthCoordinations").doc(value.request.operationId).get()).data())
+      .toEqual(before.coordination);
+    expect((await db.collection("identityAuthChallenges").where("authorizationId", "==", value.request.authorizationId).get()).size)
+      .toBe(before.challenges);
+    expect((await db.collection("auditEvents").where("resourceId", "==", value.uid).get()).size).toBe(before.audits);
+  }
+
+  async function snapshot(value: Setup) {
+    const [coordination, challenges, audits] = await Promise.all([
+      db.collection("identityAuthCoordinations").doc(value.request.operationId).get(),
+      db.collection("identityAuthChallenges").where("authorizationId", "==", value.request.authorizationId).get(),
+      db.collection("auditEvents").where("resourceId", "==", value.uid).get()
+    ]);
+    return { coordination: coordination.data(), challenges: challenges.size, audits: audits.size };
+  }
+
+  it("issues one bound bootstrap Challenge from a valid E4B2 authorization", async () => {
+    const value = await setupBootstrapIssuance();
+    const [profileBefore, usersBefore] = await Promise.all([
+      db.collection("users").doc(value.uid).get(), db.collection("users").get()
+    ]);
+    const before = await snapshot(value);
+    const response = await issue(value);
+    const challengeSnapshot = await db.collection("identityAuthChallenges").doc(response.challengeId).get();
+    const challenge = challengeSnapshot.data()!;
+    const after = await snapshot(value);
+
+    expect(challenge).toMatchObject({ challengeId: response.challengeId, contextType: "google_bootstrap",
+      expectedInternalUid: value.uid, expectedFirebaseUid: value.uid, coordinationOperationId: value.request.operationId,
+      authorizationId: value.request.authorizationId, googleSubjectHash: value.reservation.identifierHash,
+      issuanceIdempotencyKey: expect.any(String), state: "issued", revision: 1 });
+    expect(challenge).not.toHaveProperty("trustedSessionId");
+    expect(challenge.nonceHash).toBe(hashAuthChallengeSecret(response.nonce));
+    expect(challenge.stateHash).toBe(hashAuthChallengeSecret(response.state));
+    expect(JSON.stringify(challenge)).not.toContain(response.nonce);
+    expect(JSON.stringify(challenge)).not.toContain(response.state);
+    expect(after.coordination).toMatchObject({ state: "challenge_issued", revision: 2, challengeId: response.challengeId,
+      evidence: { challenge: { challengeId: response.challengeId }, firebaseSession: null, firebaseProvider: null } });
+    expect((await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).get()).data())
+      .toMatchObject({ state: "pending" });
+    expect((await db.collection("users").doc(value.uid).get()).data()).toEqual(profileBefore.data());
+    expect((await db.collection("users").get()).size).toBe(usersBefore.size);
+    expect((await db.collection("accessGrants").where("userId", "==", value.uid).get()).empty).toBe(true);
+    expect(after.audits).toBe(before.audits + 1);
+  });
+
+  it("rejects a missing authorization without writes", async () => {
+    const value = await setupBootstrapIssuance();
+    const before = await snapshot(value);
+    await expect(bootstrapCoordinator().issue({ principal: backendAdminPrincipal(), authorizationId: randomUUID(),
+      idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "AUTHORIZATION_NOT_FOUND" });
+    await unchanged(value, before);
+  });
+
+  it.each([
+    ["expired", { state: "expired", stateChangedAt: orchestrationTime }, "AUTHORIZATION_EXPIRED"],
+    ["revoked", { state: "revoked", stateChangedAt: orchestrationTime }, "AUTHORIZATION_REVOKED"],
+    ["consumed", { state: "consumed", stateChangedAt: orchestrationTime }, "AUTHORIZATION_CONSUMED"]
+  ] as const)("rejects a %s E4B2 authorization without writes", async (_label, patch, code) => {
+    const value = await setupBootstrapIssuance();
+    await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).update(patch);
+    const before = await snapshot(value);
+    await expect(issue(value)).rejects.toMatchObject({ code });
+    await unchanged(value, before);
+  });
+
+  it.each([
+    ["target user", { targetUid: `other-${randomUUID()}` }],
+    ["E4B2 operation", { operationId: randomUUID() }]
+  ] as const)("rejects an authorization/coordination mismatch for %s", async (_label, patch) => {
+    const value = await setupBootstrapIssuance();
+    await db.collection("identityLinkAuthorizations").doc(value.request.authorizationId).update(patch);
+    const before = await snapshot(value);
+    await expect(issue(value)).rejects.toMatchObject({ code: "COORDINATION_CONTEXT_INVALID" });
+    await unchanged(value, before);
+  });
+
+  it("requires the authenticated backend Super Admin principal", async () => {
+    const value = await setupBootstrapIssuance();
+    const before = await snapshot(value);
+    await expect(bootstrapCoordinator().issue({ principal: { ...backendAdminPrincipal(), uid: "other-admin" },
+      authorizationId: value.request.authorizationId, idempotencyKey: randomUUID() }))
+      .rejects.toMatchObject({ code: "ADMIN_REQUIRED" });
+    await unchanged(value, before);
+  });
+
+  it("reuses an idempotent issuance without duplicate Challenge or audit", async () => {
+    const value = await setupBootstrapIssuance();
+    const idempotencyKey = randomUUID();
+    const before = await snapshot(value);
+    const first = await issue(value, idempotencyKey);
+    const afterFirst = await snapshot(value);
+    const retry = await issue(value, idempotencyKey);
+    const afterRetry = await snapshot(value);
+    expect(retry).toEqual(first);
+    expect(afterFirst.challenges).toBe(before.challenges + 1);
+    expect(afterRetry.challenges).toBe(afterFirst.challenges);
+    expect(afterRetry.audits).toBe(afterFirst.audits);
+  });
+
+  it("accepts only one incompatible concurrent issuance", async () => {
+    const value = await setupBootstrapIssuance();
+    const results = await Promise.allSettled([issue(value, randomUUID()), issue(value, randomUUID())]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect((await db.collection("identityAuthChallenges").where("authorizationId", "==", value.request.authorizationId).get())
+      .size).toBe(1);
+    expect((await db.collection("identityAuthCoordinations").doc(value.request.operationId).get()).data())
+      .toMatchObject({ state: "challenge_issued", revision: 2 });
   });
 });
