@@ -1,4 +1,9 @@
 import { createRequire } from "node:module";
+import {
+  assertAllowedRuntimeSecrets,
+  assertAllowedSecretParameters,
+  assertOnlyAdminApiFunction
+} from "./admin-api-manifest-contract.mjs";
 
 const EXPECTED_REGION = "us-central1";
 const EXPECTED_RUNTIME_SERVICE_ACCOUNT =
@@ -9,13 +14,12 @@ const FORBIDDEN_PARAMETERS = new Set([
   "RESEND_WEBHOOK_SIGNING_SECRET",
   "INVITATION_TOKEN_KEY_V1"
 ]);
-
-const { adminApi } = await import("../functions/lib/index.js");
+const compiledExports = await import("../functions/lib/index.js");
 const requireFromFunctions = createRequire(
   new URL("../functions/package.json", import.meta.url)
 );
 const { declaredParams } = requireFromFunctions("firebase-functions/params");
-const endpoint = adminApi?.__endpoint;
+const endpoint = assertOnlyAdminApiFunction(compiledExports);
 
 if (!endpoint || endpoint.platform !== "gcfv2") {
   throw new Error("adminApi debe generar un manifiesto de Cloud Functions 2nd gen");
@@ -33,18 +37,10 @@ if (endpoint.serviceAccountEmail !== EXPECTED_RUNTIME_SERVICE_ACCOUNT) {
 if (!endpoint.httpsTrigger || Object.hasOwn(endpoint.httpsTrigger, "invoker")) {
   throw new Error("El manifiesto de adminApi no debe declarar httpsTrigger.invoker");
 }
-if (
-  Array.isArray(endpoint.secretEnvironmentVariables)
-  && endpoint.secretEnvironmentVariables.length > 0
-) {
-  throw new Error("El perfil productivo deshabilitado no debe declarar secretos");
-}
+assertAllowedRuntimeSecrets(endpoint.secretEnvironmentVariables);
 
 const parameterSpecs = declaredParams.map((parameter) => parameter.toSpec());
-const secretParameters = parameterSpecs.filter((parameter) => parameter.type === "secret");
-if (secretParameters.length > 0) {
-  throw new Error("El perfil productivo deshabilitado no debe declarar parámetros secretos");
-}
+assertAllowedSecretParameters(parameterSpecs);
 const forbiddenParameter = parameterSpecs.find((parameter) =>
   FORBIDDEN_PARAMETERS.has(parameter.name)
 );

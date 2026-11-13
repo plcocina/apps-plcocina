@@ -4,6 +4,7 @@ import { createHmac } from "node:crypto";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { createAdminApp } from "../src/app.js";
+import { GoogleBootstrapChallengeCoordinatorError } from "../src/identities/identity-google-bootstrap-challenge-coordinator.js";
 
 const ORIGIN = "https://apps.plcocina.com";
 const NOW = new Date("2026-10-19T18:00:00.000Z");
@@ -151,6 +152,104 @@ describe("admin API authentication", () => {
     expect(response.status).toBe(401);
     expect(response.body.error.code).toBe(apiCode);
     expect(verifier).toHaveBeenCalledWith("rejected-token", true);
+  });
+});
+
+describe("Google bootstrap challenge HTTP endpoint", () => {
+  const authorizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const idempotencyKey = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const challenge = { challengeId: authorizationId, nonce: "safe-nonce", state: "safe-state", expiresAt: "2026-10-19T18:05:00.000Z" };
+  const issue = vi.fn().mockResolvedValue(challenge);
+  const appWithIssue = (verifier = vi.fn().mockResolvedValue(token()), issuer = issue) => createAdminApp({
+    verifyIdToken: verifier,
+    origins: new Set([ORIGIN]),
+    now: () => NOW,
+    googleBootstrapComposition: () => ({ issue: issuer } as never)
+  });
+  const sendIssue = (app: ReturnType<typeof createAdminApp>, body: Record<string, unknown> = { authorizationId, idempotencyKey }) => request(app)
+    .post("/api/admin/identities/google-bootstrap/challenges")
+    .set("Origin", ORIGIN)
+    .set("Authorization", "Bearer valid-token")
+    .send(body);
+
+  it("issues a challenge for an authenticated Super Admin", async () => {
+    const verifier = vi.fn().mockResolvedValue(token());
+    const issuer = vi.fn().mockResolvedValue(challenge);
+    const app = createAdminApp({ verifyIdToken: verifier, origins: new Set([ORIGIN]), now: () => NOW,
+      googleBootstrapComposition: () => ({ issue: issuer } as never) });
+    const response = await sendIssue(app);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, data: challenge });
+    expect(issuer).toHaveBeenCalledWith(expect.objectContaining({ authorizationId, idempotencyKey,
+      principal: expect.objectContaining({ uid: "admin-uid", superAdmin: true }) }));
+    expect(verifier).toHaveBeenCalledWith("valid-token", true);
+  });
+
+  it("rejects missing authentication and non-admin callers", async () => {
+    const noAuth = await request(appWithIssue()).post("/api/admin/identities/google-bootstrap/challenges")
+      .set("Origin", ORIGIN).send({ authorizationId, idempotencyKey });
+    expect(noAuth.status).toBe(401);
+    const commonUser = appWithIssue(vi.fn().mockResolvedValue(token({ super_admin: false })));
+    expect((await sendIssue(commonUser)).status).toBe(403);
+  });
+
+  it("rejects caller supplied identity fields", async () => {
+    const issuer = vi.fn();
+    const app = createAdminApp({ verifyIdToken: vi.fn().mockResolvedValue(token()), origins: new Set([ORIGIN]),
+      googleBootstrapComposition: () => ({ issue: issuer } as never) });
+    const response = await sendIssue(app, { authorizationId, idempotencyKey, uid: "forged", superAdmin: true });
+    expect(response.status).toBe(400);
+    expect(issuer).not.toHaveBeenCalled();
+  });
+
+  it("returns a generic error when E4B2 authorization is invalid", async () => {
+    const failure = vi.fn().mockRejectedValue(new GoogleBootstrapChallengeCoordinatorError("AUTHORIZATION_INVALID"));
+    const app = createAdminApp({ verifyIdToken: vi.fn().mockResolvedValue(token()), origins: new Set([ORIGIN]),
+      googleBootstrapComposition: () => ({ issue: failure } as never) });
+    const response = await sendIssue(app);
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(response.body)).not.toContain("AUTHORIZATION_INVALID");
+    expect(JSON.stringify(response.body)).not.toContain("safe-state");
+  });
+
+  it("returns the same challenge for repeated idempotent issuance", async () => {
+    const issuer = vi.fn().mockResolvedValue(challenge);
+    const app = createAdminApp({ verifyIdToken: vi.fn().mockResolvedValue(token()), origins: new Set([ORIGIN]),
+      googleBootstrapComposition: () => ({ issue: issuer } as never) });
+    const first = await sendIssue(app);
+    const second = await sendIssue(app);
+    expect(first.body.data).toEqual(second.body.data);
+    expect(issuer).toHaveBeenCalledTimes(2);
+    expect(issuer.mock.calls[0]?.[0]).toEqual(issuer.mock.calls[1]?.[0]);
+  });
+
+  it("sets no-store and does not expose details in service errors", async () => {
+    const app = createAdminApp({ verifyIdToken: vi.fn().mockResolvedValue(token()), origins: new Set([ORIGIN]),
+      googleBootstrapComposition: () => ({ issue: vi.fn().mockRejectedValue(new Error("secret-key-material")) } as never) });
+    const response = await sendIssue(app);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(JSON.stringify(response.body)).not.toContain("secret-key-material");
+  });
+
+  it("fails closed for missing or invalid bootstrap configuration", async () => {
+    const missing = createAdminApp({ verifyIdToken: vi.fn().mockResolvedValue(token()), origins: new Set([ORIGIN]) });
+    expect((await sendIssue(missing)).status).toBe(503);
+    const invalid = createAdminApp({ verifyIdToken: vi.fn().mockResolvedValue(token()), origins: new Set([ORIGIN]),
+      googleBootstrapComposition: () => ({ issue: vi.fn().mockRejectedValue(new Error("AUTH_CONFIGURATION_INVALID: secret")) } as never) });
+    const response = await sendIssue(invalid);
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).not.toContain("secret");
+  });
+
+  it("keeps existing administrative routes available", async () => {
+    const app = appWithIssue();
+    const me = await request(app).get("/api/admin/me").set("Authorization", "Bearer valid-token");
+    expect(me.status).toBe(200);
+    expect(me.body.data).toMatchObject({ uid: "admin-uid", superAdmin: true });
+    const applications = await request(app).get("/api/admin/applications")
+      .set("Origin", ORIGIN).set("Authorization", "Bearer valid-token");
+    expect(applications.status).toBe(503);
+    expect(applications.body.error.code).toBe("INTERNAL_ERROR");
   });
 });
 

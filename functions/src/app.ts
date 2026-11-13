@@ -1,4 +1,5 @@
 import express, { type Response } from "express";
+import { z } from "zod";
 import type { DecodedIdToken } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
 import { Timestamp } from "firebase-admin/firestore";
@@ -22,6 +23,7 @@ import { ResendWebhookService } from "./invitations/resend-webhook-service.js";
 import type { WebhookReplayStore } from "./invitations/resend-invitation-email-provider.js";
 import { InvitationQueryService } from "./invitations/invitation-query-service.js";
 import { AccessGrantService } from "./access-grants/access-grant-service.js";
+import type { InternalGoogleBootstrapComposition } from "./identities/identity-google-bootstrap-composition.js";
 
 export type AdminApiDependencies = {
   verifyIdToken: VerifyIdToken;
@@ -33,6 +35,7 @@ export type AdminApiDependencies = {
   invitationTokens?: InvitationTokenKeyring | null;
   invitationEmailProvider?: InvitationEmailProvider;
   resendWebhook?: { enabled: boolean; secret?: string; replayStore?: WebhookReplayStore };
+  googleBootstrapComposition?: () => InternalGoogleBootstrapComposition;
 };
 
 function principalFrom(request: AdminRequest) {
@@ -188,6 +191,29 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
       data: principal,
       requestId: requestIdFrom(response)
     });
+  });
+
+  app.post("/api/admin/identities/google-bootstrap/challenges", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const principal = principalFrom(request);
+      const body = z.object({ authorizationId: z.string().uuid(), idempotencyKey: z.string().uuid(),
+        lifetimeMs: z.number().int().positive().max(15 * 60 * 1000).optional() }).strict().parse(request.body);
+      if (!dependencies.googleBootstrapComposition) throw new Error("BOOTSTRAP_DEPENDENCY_UNAVAILABLE");
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      const challenge = await dependencies.googleBootstrapComposition().issue({ principal, ...body });
+      response.status(200).json({ ok: true, data: challenge, requestId: requestIdFrom(response) });
+    } catch (error) {
+      if (error instanceof Error && error.message === "BOOTSTRAP_DEPENDENCY_UNAVAILABLE") {
+        next(new ApiError(503, "INTERNAL_ERROR", "El servicio de bootstrap no está disponible."));
+        return;
+      }
+      if (error instanceof Error && (error.name === "ZodError" || error.message.includes("AUTH_CONFIGURATION_INVALID")
+        || error.message.includes("IDENTIFIER_PEPPER_TOO_SHORT"))) {
+        next(new ApiError(400, "VALIDATION_ERROR", "La solicitud o configuración no es válida."));
+        return;
+      }
+      next(error);
+    }
   });
 
   app.get("/api/admin/applications", authenticate, async (request: AdminRequest, response, next) => {

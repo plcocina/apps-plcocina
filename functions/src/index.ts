@@ -3,6 +3,8 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { createAdminApp } from "./app.js";
+import { createInternalGoogleBootstrapComposition } from "./identities/identity-google-bootstrap-composition.js";
+import { identifierPepperParam, internalAuthOrchestrationConfiguration } from "./identities/identity-auth-orchestration-config.js";
 import {
   DisabledInvitationEmailProvider,
   SimulatedInvitationEmailProvider
@@ -44,6 +46,9 @@ const app = createAdminApp({
   invitationTokens,
   invitationEmailProvider,
   resendWebhook: { enabled: false },
+  googleBootstrapComposition: () => createInternalGoogleBootstrapComposition(
+    firestore, internalAuthOrchestrationConfiguration()
+  ),
   origins: allowedOrigins(),
   firestore
 });
@@ -55,7 +60,8 @@ export const adminApi = onRequest(
     minInstances: 0,
     maxInstances: 10,
     timeoutSeconds: 30,
-    memory: "256MiB"
+    memory: "256MiB",
+    secrets: [identifierPepperParam]
   },
   app
 );
