@@ -4,6 +4,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { createAdminApp } from "./app.js";
 import { createInternalGoogleBootstrapComposition } from "./identities/identity-google-bootstrap-composition.js";
+import { GoogleIdentityLinkingService } from "./identities/identity-linking-service.js";
 import { identifierPepperParam, internalAuthOrchestrationConfiguration } from "./identities/identity-auth-orchestration-config.js";
 import {
   DisabledInvitationEmailProvider,
@@ -49,6 +50,11 @@ const app = createAdminApp({
   googleBootstrapComposition: () => createInternalGoogleBootstrapComposition(
     firestore, internalAuthOrchestrationConfiguration()
   ),
+  bindEmployeeInvitationAuthorization: (input) => {
+    const configuration = internalAuthOrchestrationConfiguration();
+    return new GoogleIdentityLinkingService(firestore, configuration.identifierPepper,
+      configuration.protectedSuperAdminUid).bindEmployeeInvitationAuthorization(input);
+  },
   origins: allowedOrigins(),
   firestore
 });

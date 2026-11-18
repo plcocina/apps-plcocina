@@ -209,6 +209,7 @@ export class AuthChallengePersistenceService {
           authorizationId: value.authorizationId,
           expected: { operationId: value.authorizationBinding.operationId, targetUid: value.expectedFirebaseUid,
             googleSubjectHash: value.googleSubjectHash ?? "", expectedRevision: value.authorizationBinding.expectedRevision },
+          allowConsumedLink: value.contextType === "google_bootstrap",
           now: issuedAt });
         if (authorization.authorizedByUid !== value.trustedOperatorUid) {
           throw new AuthChallengePersistenceError("TRUSTED_CONTEXT_MISMATCH");
@@ -230,7 +231,8 @@ export class AuthChallengePersistenceService {
       authorizationId: input.value.authorizationId,
       expected: { operationId: input.value.authorizationBinding.operationId,
         targetUid: input.value.expectedFirebaseUid, googleSubjectHash: input.value.googleSubjectHash ?? "",
-        expectedRevision: input.value.authorizationBinding.expectedRevision }, now: this.now() });
+        expectedRevision: input.value.authorizationBinding.expectedRevision },
+      allowConsumedLink: input.value.contextType === "google_bootstrap", now: this.now() });
     if (authorization.authorizedByUid !== input.value.trustedOperatorUid) {
       throw new AuthChallengePersistenceError("TRUSTED_CONTEXT_MISMATCH");
     }

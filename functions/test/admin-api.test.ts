@@ -5,6 +5,7 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { createAdminApp } from "../src/app.js";
 import { GoogleBootstrapChallengeCoordinatorError } from "../src/identities/identity-google-bootstrap-challenge-coordinator.js";
+import { GoogleIdentityLinkError } from "../src/identities/identity-linking-service.js";
 
 const ORIGIN = "https://apps.plcocina.com";
 const NOW = new Date("2026-10-19T18:00:00.000Z");
@@ -250,6 +251,84 @@ describe("Google bootstrap challenge HTTP endpoint", () => {
       .set("Origin", ORIGIN).set("Authorization", "Bearer valid-token");
     expect(applications.status).toBe(503);
     expect(applications.body.error.code).toBe("INTERNAL_ERROR");
+  });
+});
+
+describe("E4B2 invitation binding HTTP endpoint", () => {
+  const authorizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const invitationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const operationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const authorization = { authorizationId, operationId, invitationId, state: "pending" };
+  const appWithBinding = (verifier = vi.fn().mockResolvedValue(token()), binder = vi.fn().mockResolvedValue(authorization)) => createAdminApp({
+    verifyIdToken: verifier,
+    origins: new Set([ORIGIN]),
+    bindEmployeeInvitationAuthorization: binder as never
+  });
+  const sendBinding = (app: ReturnType<typeof createAdminApp>, body: Record<string, unknown> = { authorizationId, invitationId }) => request(app)
+    .post("/api/admin/identities/google-bootstrap/authorizations")
+    .set("Origin", ORIGIN)
+    .set("Authorization", "Bearer valid-token")
+    .send(body);
+
+  it("binds a valid invitation using the authenticated Super Admin principal", async () => {
+    const binder = vi.fn().mockResolvedValue(authorization);
+    const app = appWithBinding(vi.fn().mockResolvedValue(token()), binder);
+    const response = await sendBinding(app);
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({ authorizationId, operationId, invitationId, state: "pending" });
+    expect(response.body.data).not.toHaveProperty("targetUid");
+    expect(response.body.data).not.toHaveProperty("googleSubjectHash");
+    expect(binder).toHaveBeenCalledWith(expect.objectContaining({ authorizationId, invitationId,
+      principal: expect.objectContaining({ uid: "admin-uid", superAdmin: true }) }));
+  });
+
+  it("rejects missing authentication and callers without Super Admin privileges", async () => {
+    const binder = vi.fn();
+    const app = appWithBinding(vi.fn().mockResolvedValue(token()), binder);
+    const anonymous = await request(app).post("/api/admin/identities/google-bootstrap/authorizations")
+      .set("Origin", ORIGIN).send({ authorizationId, invitationId });
+    expect(anonymous.status).toBe(401);
+    const commonUser = appWithBinding(vi.fn().mockResolvedValue(token({ super_admin: false })), binder);
+    expect((await sendBinding(commonUser)).status).toBe(403);
+    expect(binder).not.toHaveBeenCalled();
+  });
+
+  it("rejects identity evidence supplied in the request body", async () => {
+    const binder = vi.fn();
+    const response = await sendBinding(appWithBinding(vi.fn().mockResolvedValue(token()), binder), {
+      authorizationId, invitationId, targetUid: "forged-uid", googleSubjectHash: "f".repeat(64),
+      operationId, authorizedByUid: "admin-uid"
+    });
+    expect(response.status).toBe(400);
+    expect(binder).not.toHaveBeenCalled();
+  });
+
+  it("returns a controlled invalid-invitation error", async () => {
+    const binder = vi.fn().mockRejectedValue(new GoogleIdentityLinkError("INVITATION_NOT_ACTIVE", "private invite detail"));
+    const response = await sendBinding(appWithBinding(vi.fn().mockResolvedValue(token()), binder));
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("INVITATION_INVALID");
+    expect(JSON.stringify(response.body)).not.toContain("private invite detail");
+  });
+
+  it("recovers equivalent retries and rejects another invitation without changing the binding", async () => {
+    let storedInvitationId: string | null = null;
+    const binder = vi.fn(async (input: { authorizationId: string; invitationId: string }) => {
+      if (storedInvitationId && storedInvitationId !== input.invitationId) {
+        throw new GoogleIdentityLinkError("AUTHORIZATION_INVITATION_CONFLICT", "conflicting invitation");
+      }
+      storedInvitationId = input.invitationId;
+      return { ...authorization, invitationId: input.invitationId };
+    });
+    const app = appWithBinding(vi.fn().mockResolvedValue(token()), binder as never);
+    const first = await sendBinding(app);
+    const replay = await sendBinding(app);
+    const conflict = await sendBinding(app, { authorizationId, invitationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" });
+    expect(first.status).toBe(200);
+    expect(replay.body.data).toEqual(first.body.data);
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(storedInvitationId).toBe(invitationId);
   });
 });
 

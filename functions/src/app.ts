@@ -4,7 +4,7 @@ import type { DecodedIdToken } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
 import { Timestamp } from "firebase-admin/firestore";
 import { ApplicationService, publicApplication } from "./applications/application-service.js";
-import { requireSuperAdmin, type AdminRequest, type VerifyIdToken } from "./auth/require-super-admin.js";
+import { requireSuperAdmin, type AdminPrincipal, type AdminRequest, type VerifyIdToken } from "./auth/require-super-admin.js";
 import { ADMIN_API_VERSION, REGION } from "./config.js";
 import { accessGrantsListResponseSchema, healthResponseSchema, invitationDetailResponseSchema, invitationResponseSchema, invitationsListResponseSchema, meResponseSchema, userResponseSchema, usersListResponseSchema } from "./http/contracts.js";
 import { ApiError, errorHandler } from "./http/errors.js";
@@ -24,6 +24,8 @@ import type { WebhookReplayStore } from "./invitations/resend-invitation-email-p
 import { InvitationQueryService } from "./invitations/invitation-query-service.js";
 import { AccessGrantService } from "./access-grants/access-grant-service.js";
 import type { InternalGoogleBootstrapComposition } from "./identities/identity-google-bootstrap-composition.js";
+import { GoogleIdentityLinkError } from "./identities/identity-linking-service.js";
+import type { IdentityLinkAuthorization } from "./identities/identity-linking-contracts.js";
 
 export type AdminApiDependencies = {
   verifyIdToken: VerifyIdToken;
@@ -36,6 +38,11 @@ export type AdminApiDependencies = {
   invitationEmailProvider?: InvitationEmailProvider;
   resendWebhook?: { enabled: boolean; secret?: string; replayStore?: WebhookReplayStore };
   googleBootstrapComposition?: () => InternalGoogleBootstrapComposition;
+  bindEmployeeInvitationAuthorization?: (input: {
+    authorizationId: string;
+    invitationId: string;
+    principal: AdminPrincipal;
+  }) => Promise<IdentityLinkAuthorization>;
 };
 
 function principalFrom(request: AdminRequest) {
@@ -210,6 +217,49 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
       if (error instanceof Error && (error.name === "ZodError" || error.message.includes("AUTH_CONFIGURATION_INVALID")
         || error.message.includes("IDENTIFIER_PEPPER_TOO_SHORT"))) {
         next(new ApiError(400, "VALIDATION_ERROR", "La solicitud o configuración no es válida."));
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.post("/api/admin/identities/google-bootstrap/authorizations", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const principal = principalFrom(request);
+      const body = z.object({ authorizationId: z.string().uuid(), invitationId: z.string().uuid() }).strict().parse(request.body);
+      if (!dependencies.bindEmployeeInvitationAuthorization) {
+        throw new ApiError(503, "INTERNAL_ERROR", "El servicio de autorización de identidad no está disponible.");
+      }
+      const authorization = await dependencies.bindEmployeeInvitationAuthorization({ ...body, principal });
+      response.status(200).json({ ok: true, data: {
+        authorizationId: authorization.authorizationId,
+        operationId: authorization.operationId,
+        invitationId: authorization.invitationId,
+        state: authorization.state
+      }, requestId: requestIdFrom(response) });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        next(new ApiError(400, "VALIDATION_ERROR", "La solicitud no es válida."));
+        return;
+      }
+      if (error instanceof GoogleIdentityLinkError) {
+        if (error.code === "INVITATION_NOT_FOUND") {
+          next(new ApiError(404, "NOT_FOUND", "La invitación no existe."));
+          return;
+        }
+        if (["INVITATION_NOT_ACTIVE", "INVITATION_UID_MISMATCH"].includes(error.code)) {
+          next(new ApiError(400, "INVITATION_INVALID", "La invitación no es válida para esta autorización."));
+          return;
+        }
+        if (["IDEMPOTENCY_CONFLICT", "AUTHORIZATION_INVITATION_CONFLICT"].includes(error.code)) {
+          next(new ApiError(409, "IDEMPOTENCY_CONFLICT", "La autorización ya está vinculada a otra solicitud."));
+          return;
+        }
+        if (error.code === "AUTHORIZATION_NOT_FOUND") {
+          next(new ApiError(404, "NOT_FOUND", "La referencia de autorización no existe."));
+          return;
+        }
+        next(new ApiError(409, "PROFILE_INCONSISTENT", "No se pudo verificar el contexto E4B2 persistido."));
         return;
       }
       next(error);

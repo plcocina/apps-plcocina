@@ -172,7 +172,7 @@ export class IdentityAuthOrchestrationPersistenceService {
             authorizationId: request.authorizationId,
             expected: { operationId: current.evidence.firestoreLink.linkOperationId,
               targetUid: current.expectedFirebaseUid, googleSubjectHash,
-              expectedRevision: current.evidence.firestoreLink.profileRevision - 1 }, now: timestamp });
+              expectedRevision: current.evidence.firestoreLink.profileRevision - 1 }, allowConsumedLink: true, now: timestamp });
           if (authorization.authorizedByUid !== request.trustedAdministratorUid) {
             throw new AuthOrchestrationPersistenceError("AUTHORIZATION_INVALID");
           }
@@ -216,7 +216,7 @@ export class IdentityAuthOrchestrationPersistenceService {
           authorizationId: request.authorizationId,
           expected: { operationId: current.evidence.firestoreLink.linkOperationId,
             targetUid: current.expectedFirebaseUid, googleSubjectHash,
-            expectedRevision: current.evidence.firestoreLink.profileRevision - 1 }, now: timestamp });
+            expectedRevision: current.evidence.firestoreLink.profileRevision - 1 }, allowConsumedLink: true, now: timestamp });
         if (authorizationData.authorizedByUid !== request.trustedAdministratorUid) {
           throw new AuthOrchestrationPersistenceError("AUTHORIZATION_INVALID");
         }

@@ -4,6 +4,7 @@ import { Timestamp, getFirestore, type Firestore } from "firebase-admin/firestor
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GoogleIdentityLinkingService, readValidIdentityLinkAuthorization } from "../src/identities/identity-linking-service.js";
 import { IdentityReservationService } from "../src/identities/identity-reservation-service.js";
+import { AuthCoordinationPersistenceService } from "../src/identities/identity-auth-coordination-service.js";
 
 let app: ReturnType<typeof initializeApp>;
 let db: Firestore;
@@ -21,7 +22,7 @@ afterAll(async () => { await deleteApp(app); });
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function fixture(overrides: { uid?: string; subject?: string; profile?: Record<string, unknown>; authorization?: Record<string, unknown> } = {}) {
+async function fixture(overrides: { uid?: string; subject?: string; profile?: Record<string, unknown>; authorization?: Record<string, unknown>; persistAuthorization?: boolean } = {}) {
   const uid = overrides.uid ?? `google-user-${randomUUID()}`;
   const subject = overrides.subject ?? `google-subject-${randomUUID()}`;
   const operationId = randomUUID();
@@ -87,7 +88,7 @@ async function fixture(overrides: { uid?: string; subject?: string; profile?: Re
     ...overrides.authorization
   };
   const service = new GoogleIdentityLinkingService(db, pepper, adminUid, () => clock);
-  await service.persistAuthorization(authorization);
+  if (overrides.persistAuthorization !== false) await service.persistAuthorization(authorization);
   const request = {
     authorizationId,
     operation: "google.identity_link",
@@ -119,6 +120,181 @@ async function link(value: Fixture) {
 async function expectRejected(work: Promise<unknown>, code: string) {
   await expect(work).rejects.toMatchObject({ code });
 }
+
+function invitationRecord(uid: string, overrides: {
+  status?: "active" | "revoked";
+  expiresAt?: Timestamp;
+  token?: Record<string, unknown> | null;
+} = {}) {
+  const invitationId = randomUUID();
+  const email = `invitation-${randomUUID()}@plcocina.com`;
+  const expiresAt = overrides.expiresAt ?? Timestamp.fromMillis(clock.toMillis() + 60 * 60_000);
+  const issuedAt = Timestamp.fromMillis(clock.toMillis() - 60_000);
+  return {
+    invitationId,
+    email,
+    normalizedEmail: email,
+    displayName: "Empleado invitado",
+    uid,
+    status: overrides.status ?? "active",
+    token: overrides.token === null ? null : overrides.token ?? {
+      hash: "a".repeat(64), generation: 1, salt: "A".repeat(22), keyVersion: 1, issuedAt, expiresAt
+    },
+    delivery: {
+      provider: "simulated" as const, status: "accepted" as const, idempotencyKey: randomUUID(),
+      providerMessageId: null, templateVersion: 1, firstAttemptAt: issuedAt, retryUntil: expiresAt,
+      sentAt: issuedAt, deliveredAt: issuedAt, failureCode: null
+    },
+    expiresAt,
+    createdAt: issuedAt,
+    createdBy: adminUid,
+    updatedAt: issuedAt,
+    updatedBy: adminUid,
+    pendingOperationId: null,
+    consumeOperationId: null,
+    consumeLeaseExpiresAt: null,
+    passwordSetAt: null,
+    confirmationExpiresAt: null,
+    deliveredAt: issuedAt,
+    acceptedAt: null,
+    revokedAt: null,
+    revokedBy: null,
+    revokeReason: null,
+    expiredAt: null,
+    resendCount: 0,
+    lastSentAt: issuedAt,
+    revision: 1,
+    version: 2 as const
+  };
+}
+
+const authenticatedAdmin = {
+  uid: adminUid, email: "admin@plcocina.com", authTime: 1_799_999_000, issuedAt: 1_799_999_000, superAdmin: true as const
+};
+
+async function persistInvitationBinding(value: Fixture, invitation = invitationRecord(value.uid)) {
+  await db.collection("invitations").doc(invitation.invitationId).set(invitation);
+  const authorization = { ...value.authorization, invitationId: invitation.invitationId };
+  const result = await value.service.persistEmployeeInvitationAuthorization(authorization, authenticatedAdmin);
+  return { authorization, invitation, result };
+}
+
+describe("E4B2 invitation-bound authorization persistence", () => {
+  it("persists an active invitation binding to the target UID", async () => {
+    const value = await fixture({ persistAuthorization: false });
+    const linked = await persistInvitationBinding(value);
+    expect(linked.result).toMatchObject({
+      authorizationId: value.authorization.authorizationId, operationId: value.authorization.operationId,
+      targetUid: value.uid, invitationId: linked.invitation.invitationId
+    });
+    expect((await db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId).get()).data())
+      .toMatchObject({ targetUid: value.uid, operationId: value.authorization.operationId, invitationId: linked.invitation.invitationId });
+  });
+
+  it.each([
+    ["expired", { expiresAt: clock }, "INVITATION_NOT_ACTIVE"],
+    ["revoked", { status: "revoked" as const, token: null }, "INVITATION_NOT_ACTIVE"],
+    ["another UID", { uid: "different-employee" }, "INVITATION_UID_MISMATCH"]
+  ])("rejects an %s invitation without writing an authorization", async (_label, overrides, code) => {
+    const value = await fixture({ persistAuthorization: false });
+    const invitation = invitationRecord(overrides.uid ?? value.uid, overrides);
+    const invitationRef = db.collection("invitations").doc(invitation.invitationId);
+    await invitationRef.set(invitation);
+    const before = (await invitationRef.get()).data();
+    await expectRejected(value.service.persistEmployeeInvitationAuthorization(
+      { ...value.authorization, invitationId: invitation.invitationId }, authenticatedAdmin
+    ), code);
+    expect((await db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId).get()).exists).toBe(false);
+    expect((await invitationRef.get()).data()).toEqual(before);
+  });
+
+  it("rejects a missing invitation without a partial authorization write", async () => {
+    const value = await fixture({ persistAuthorization: false });
+    const invitationId = randomUUID();
+    await expectRejected(value.service.persistEmployeeInvitationAuthorization(
+      { ...value.authorization, invitationId }, authenticatedAdmin
+    ), "INVITATION_NOT_FOUND");
+    expect((await db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId).get()).exists).toBe(false);
+  });
+
+  it("returns the same authorization for an equivalent retry", async () => {
+    const value = await fixture({ persistAuthorization: false });
+    const invitation = invitationRecord(value.uid);
+    await db.collection("invitations").doc(invitation.invitationId).set(invitation);
+    const authorization = { ...value.authorization, invitationId: invitation.invitationId };
+    const first = await value.service.persistEmployeeInvitationAuthorization(authorization, authenticatedAdmin);
+    const second = await value.service.persistEmployeeInvitationAuthorization(authorization, authenticatedAdmin);
+    expect(second).toEqual(first);
+  });
+
+  it("resolves target UID and Google subject only from completed E4B2 records", async () => {
+    const value = await fixture();
+    await link(value);
+    const authorizationRef = db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId);
+    await authorizationRef.update({ state: "pending", stateChangedAt: null });
+    const profileSnapshot = await db.collection("users").doc(value.uid).get();
+    const linkedProfile = profileSnapshot.data()!;
+    const expiresAt = Timestamp.fromMillis(clock.toMillis() + 5 * 60_000);
+    const coordinationId = randomUUID();
+    await new AuthCoordinationPersistenceService(db, adminUid, () => clock).create({
+      trustedAdministratorUid: adminUid,
+      document: {
+        operationId: coordinationId, operation: "google.firebase_provider_link",
+        expectedFirebaseUid: value.uid, expectedInternalUid: value.uid,
+        googleSubjectHash: value.reservation.identifierHash, state: "not_started",
+        expectedProfileRevision: linkedProfile.revision, currentProfileRevision: linkedProfile.revision,
+        idempotencyKey: randomUUID(), authorizationId: value.authorization.authorizationId, challengeId: null,
+        evidence: {
+          authorization: { authorizationId: value.authorization.authorizationId, operation: "google.identity_link",
+            validatedBy: "identity-link-authorization", validatedAt: clock, validUntil: expiresAt },
+          firestoreLink: { linkOperationId: value.authorization.operationId,
+            observedBy: "identity-linking-service", linkedAt: clock, profileRevision: linkedProfile.revision,
+            activationStatus: "linked_pending_activation", authDisabled: true },
+          challenge: null, googleVerification: null, firebaseSession: null, firebaseProvider: null, postflight: null
+        },
+        conflictReason: null, revision: 1, lastEvent: null, createdAt: clock, updatedAt: clock, expiresAt,
+        localActivationStatus: "linked_pending_activation", localAuthDisabled: true, version: 1
+      }
+    });
+    const invitation = invitationRecord(value.uid);
+    await db.collection("invitations").doc(invitation.invitationId).set(invitation);
+    const result = await value.service.bindEmployeeInvitationAuthorization({
+      authorizationId: value.authorization.authorizationId, invitationId: invitation.invitationId,
+      principal: authenticatedAdmin
+    });
+    expect(result).toMatchObject({
+      authorizationId: value.authorization.authorizationId, operationId: value.authorization.operationId,
+      targetUid: value.uid, googleSubjectHash: value.reservation.identifierHash,
+      invitationId: invitation.invitationId, state: "pending"
+    });
+  });
+
+  it("rejects another invitation for the same UID without replacing the original binding", async () => {
+    const value = await fixture({ persistAuthorization: false });
+    const firstInvitation = invitationRecord(value.uid);
+    const secondInvitation = invitationRecord(value.uid);
+    await db.collection("invitations").doc(firstInvitation.invitationId).set(firstInvitation);
+    await db.collection("invitations").doc(secondInvitation.invitationId).set(secondInvitation);
+    const authorizationRef = db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId);
+    await value.service.persistEmployeeInvitationAuthorization(
+      { ...value.authorization, invitationId: firstInvitation.invitationId }, authenticatedAdmin
+    );
+    const before = (await authorizationRef.get()).data();
+    const secondBefore = (await db.collection("invitations").doc(secondInvitation.invitationId).get()).data();
+    await expectRejected(value.service.persistEmployeeInvitationAuthorization(
+      { ...value.authorization, invitationId: secondInvitation.invitationId }, authenticatedAdmin
+    ), "AUTHORIZATION_INVITATION_CONFLICT");
+    expect((await authorizationRef.get()).data()).toEqual(before);
+    expect((await db.collection("invitations").doc(secondInvitation.invitationId).get()).data()).toEqual(secondBefore);
+  });
+
+  it("keeps legacy E4B2 authorizations without an invitation binding", async () => {
+    const value = await fixture();
+    const stored = (await db.collection("identityLinkAuthorizations").doc(value.authorization.authorizationId).get()).data();
+    expect(stored).toBeDefined();
+    expect(stored).not.toHaveProperty("invitationId");
+  });
+});
 
 describe("transactional E4B2 authorization reader", () => {
   it("reads a valid authorization through the supplied Firestore transaction without writing", async () => {

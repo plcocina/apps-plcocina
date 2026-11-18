@@ -18,6 +18,7 @@ export const identityLinkAuthorizationSchema = z.object({
   authorizationId: uuidSchema,
   operation: z.literal("google.identity_link"),
   operationId: uuidSchema,
+  invitationId: uuidSchema.optional(),
   idempotencyKey: uuidSchema,
   targetUid: uidSchema,
   googleSubjectHash: subjectHashSchema,
@@ -37,6 +38,11 @@ export const identityLinkAuthorizationSchema = z.object({
   if ((authorization.state === "pending") !== (authorization.stateChangedAt === null)) {
     context.addIssue({ code: "custom", path: ["stateChangedAt"], message: "Sólo una autorización pendiente carece de sello de transición" });
   }
+});
+
+/** Explicit E4B2 authorization shape for an employee entering through an invitation. */
+export const employeeInvitationLinkAuthorizationSchema = identityLinkAuthorizationSchema.safeExtend({
+  invitationId: uuidSchema
 });
 
 export const linkGoogleIdentityRequestSchema = z.object({
