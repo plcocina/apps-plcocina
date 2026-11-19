@@ -1,6 +1,7 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
 import { userV2DocumentSchema } from "../identities/identity-models.js";
+import { authMethodV21Schema } from "../identities/identity-models.js";
 
 const timestampSchema = z.instanceof(Timestamp);
 const uidSchema = z.string().min(1).max(128).refine((value) => !value.includes("/"));
@@ -98,6 +99,7 @@ export const invitationDocumentSchema = z.object({
   email: z.string().email(),
   normalizedEmail: normalizedEmailSchema,
   displayName: z.string().trim().min(1).max(160),
+  verificationMethod: authMethodV21Schema.optional(),
   uid: uidSchema,
   status: z.enum(["provisioning", "pending_delivery", "active", "accepting", "password_set", "accepted", "expired", "revoked", "reconciliation_required"]),
   token: z.object({

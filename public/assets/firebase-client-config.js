@@ -3,5 +3,6 @@ export const firebaseConfig = Object.freeze({
   authDomain: "plcocina-apps.firebaseapp.com",
   projectId: "plcocina-apps",
   storageBucket: "plcocina-apps.firebasestorage.app",
-  messagingSenderId: "465339579029"
+  messagingSenderId: "465339579029",
+  googleIdentityClientId: ""
 });

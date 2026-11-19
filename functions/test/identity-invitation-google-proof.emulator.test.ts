@@ -29,7 +29,7 @@ async function fixture(email = `empleado-${randomUUID()}@plcocina.com`, corporat
   const invitationId = randomUUID(); const uid = `preprovisioned-${randomUUID()}`; const material = tokens.issue(invitationId, 1);
   await getAuth(app).createUser({ uid, email: corporateEmail ? email : undefined, disabled: true });
   const stamp = clock(); const expiresAt = Timestamp.fromMillis(stamp.toMillis() + 3_600_000);
-  await db.collection("invitations").doc(invitationId).set({ invitationId, email, normalizedEmail: email.toLowerCase(), displayName: "Empleado", uid,
+  await db.collection("invitations").doc(invitationId).set({ invitationId, email, normalizedEmail: email.toLowerCase(), displayName: "Empleado", verificationMethod: "googleWorkspace", uid,
     status: "active", token: { hash: material.hash, generation: 1, salt: material.salt, keyVersion: material.keyVersion, issuedAt: stamp, expiresAt },
     delivery: { provider: "simulated", status: "accepted", idempotencyKey: `invitation/${invitationId}/generation/1`, providerMessageId: null,
       templateVersion: 1, firstAttemptAt: stamp, retryUntil: null, sentAt: stamp, deliveredAt: stamp, failureCode: null },
@@ -57,6 +57,31 @@ describe("invitation-bound initial Google proof", () => {
     expect((await db.collection("identityVerifiedGoogleProofs").doc(start.challengeId).get()).data()).toMatchObject({ subject: "google-subject-1", nonceVerified: true });
     expect((await db.collection("users").doc(f.uid).get()).data()).toMatchObject({ authDisabled: true, status: "invited", revision: 1 });
     expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+  });
+  it.each(["sms", "email", "missing"] as const)("rejects a %s invitation before starting or consuming an initial Google proof", async (method) => {
+    const f = await fixture();
+    const invitationRef = db.collection("invitations").doc(f.invitationId);
+    if (method === "missing") {
+      const legacy = (await invitationRef.get()).data()!;
+      delete legacy.verificationMethod;
+      await invitationRef.set(legacy);
+    } else await invitationRef.update({ verificationMethod: method });
+    await expect(f.service.start({ invitationId: f.invitationId, token: f.token })).rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    expect((await db.collection("identityInvitationGoogleProofChallenges").where("invitationId", "==", f.invitationId).get()).empty).toBe(true);
+    const invitation = (await invitationRef.get()).data()!;
+    await invitationRef.update({ verificationMethod: "googleWorkspace" });
+    const start = await f.service.start({ invitationId: f.invitationId, token: f.token });
+    if (method === "missing") {
+      const legacy = (await invitationRef.get()).data()!;
+      delete legacy.verificationMethod;
+      await invitationRef.set(legacy);
+    } else await invitationRef.update({ verificationMethod: method });
+    await expect(f.service.verify({ invitationId: f.invitationId, token: f.token, challengeId: start.challengeId,
+      nonce: start.nonce, googleIdToken: jwt("google-subject", f.email, start.nonce) })).rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    expect((await db.collection("identityInvitationGoogleProofChallenges").doc(start.challengeId).get()).data()?.consumedAt).toBeNull();
+    expect((await db.collection("identityVerifiedGoogleProofs").doc(start.challengeId).get()).exists).toBe(false);
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+    expect(invitation.verificationMethod).toBe(method === "missing" ? undefined : method);
   });
   it("rejects another Google account in the same Workspace domain", async () => {
     const f = await fixture(); const start = await f.service.start({ invitationId: f.invitationId, token: f.token });

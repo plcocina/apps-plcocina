@@ -9,7 +9,7 @@ import { InvitationGoogleProofService } from "./identities/identity-invitation-g
 import { GoogleBootstrapPreparationService } from "./identities/identity-google-bootstrap-preparation-service.js";
 import { GoogleBootstrapChallengeDeliveryService } from "./identities/identity-google-bootstrap-challenge-delivery-service.js";
 import { GoogleIdentityLinkingService } from "./identities/identity-linking-service.js";
-import { identifierPepperParam, internalAuthOrchestrationConfiguration } from "./identities/identity-auth-orchestration-config.js";
+import { googleWorkspaceDomainParam, identifierPepperParam, internalAuthOrchestrationConfiguration } from "./identities/identity-auth-orchestration-config.js";
 import {
   DisabledInvitationEmailProvider,
   SimulatedInvitationEmailProvider
@@ -48,6 +48,7 @@ const app = createAdminApp({
     createUser: (properties) => auth.createUser(properties)
   },
   protectedSuperAdminUid: emulatorMode ? "emulator-protected-super-admin" : protectedSuperAdminUid(),
+  googleWorkspaceDomain: googleWorkspaceDomainParam.value(),
   invitationTokens,
   invitationEmailProvider,
   resendWebhook: { enabled: false },

@@ -177,7 +177,7 @@ export const invitationDetailResponseSchema = z.object({
 
 export const invitationValidationResponseSchema = z.object({
   ok: z.literal(true),
-  data: z.object({ valid: z.literal(true), expiresAt: z.string().datetime() }).strict(),
+  data: z.object({ valid: z.literal(true), expiresAt: z.string().datetime(), verificationMethod: z.enum(["sms", "email", "googleWorkspace"]).optional() }).strict(),
   requestId: requestIdSchema
 }).strict();
 

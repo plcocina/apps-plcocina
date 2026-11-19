@@ -62,6 +62,59 @@ export async function validateInvitation(invitationId, token, options = {}) {
   return data;
 }
 
+function validOpaqueValue(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+function validChallengeId(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export async function startInvitationGoogleProof(invitationId, token, options = {}) {
+  const data = await request("/api/invitations/google-bootstrap/proof/start", {
+    ...options,
+    body: { invitationId, token }
+  });
+  if (!validChallengeId(data?.challengeId) || !validOpaqueValue(data?.nonce) || !validDate(data?.expiresAt)) {
+    throw new InvitationApiError("INVALID_RESPONSE", "El servidor devolvió una respuesta no válida.");
+  }
+  return data;
+}
+
+export async function verifyInvitationGoogleProof(invitationId, token, challengeId, nonce, googleIdToken, options = {}) {
+  const data = await request("/api/invitations/google-bootstrap/proof/verify", {
+    ...options,
+    body: { invitationId, token, challengeId, nonce, googleIdToken }
+  });
+  if (data?.state !== "verified" || !validDate(data?.verifiedAt)) {
+    throw new InvitationApiError("INVALID_RESPONSE", "El servidor devolvió una respuesta no válida.");
+  }
+  return data;
+}
+
+export async function recoverInvitationGoogleChallenge(invitationId, token, options = {}) {
+  const data = await request("/api/invitations/google-bootstrap/challenge/recover", {
+    ...options,
+    body: { invitationId, token }
+  });
+  if (!validChallengeId(data?.challengeId) || !validOpaqueValue(data?.nonce)
+    || !validOpaqueValue(data?.state) || !validDate(data?.expiresAt)) {
+    throw new InvitationApiError("INVALID_RESPONSE", "El servidor devolvió una respuesta no válida.");
+  }
+  return data;
+}
+
+export async function verifyInvitationGoogleChallenge(invitationId, token, challengeId, state, googleIdToken, options = {}) {
+  const data = await request("/api/invitations/google-bootstrap/challenge/verify", {
+    ...options,
+    body: { invitationId, token, challengeId, state, googleIdToken }
+  });
+  if (data?.state !== "google_proof_verified") {
+    throw new InvitationApiError("INVALID_RESPONSE", "El servidor devolvió una respuesta no válida.");
+  }
+  return data;
+}
+
 export async function establishInvitationPassword(invitationId, token, password, options = {}) {
   const data = await request("/api/invitations/establish-password", {
     ...options,

@@ -76,6 +76,9 @@ button:disabled { cursor: wait; opacity: .65; }
 button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid var(--brand-yellow); outline-offset: 3px; }
 .message { margin: 16px 0 0; padding: 12px 13px; border-radius: 9px; font-size: 12px; line-height: 1.55; }
 .error { border: 1px solid #e5b5b1; background: #fff5f4; color: var(--danger); }
+.google-button-slot { min-height: 44px; display: flex; justify-content: center; margin-top: 22px; }
+.google-actions { width: 100%; }
+.google-actions .secondary-button { margin-top: 10px; }
 
 .footer { padding: 24px 0 28px; display: flex; justify-content: space-between; gap: 18px; color: var(--muted); font-size: 12px; }
 .footer a { color: inherit; font-weight: 700; text-decoration: none; }

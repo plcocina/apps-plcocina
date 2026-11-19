@@ -12,6 +12,7 @@ import {
 import type { DirectoryUser, UserDirectory } from "../users/user-query-service.js";
 import { InvitationEmailProviderError, type InvitationEmailProvider } from "./invitation-email-provider.js";
 import { effectiveInvitationStatus } from "./invitation-transitions.js";
+import { authMethodV21Schema } from "../identities/identity-models.js";
 import {
   INVITATION_DEFAULT_HOURS,
   INVITATION_MAX_HOURS,
@@ -21,6 +22,7 @@ import {
 const createInvitationSchema = z.object({
   displayName: z.string().trim().min(1).max(160),
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
+  verificationMethod: authMethodV21Schema.optional(),
   expiresInHours: z.number().int().min(1).max(INVITATION_MAX_HOURS).default(INVITATION_DEFAULT_HOURS)
 }).strict();
 const keySchema = z.string().uuid();
@@ -92,7 +94,8 @@ export class InvitationService {
     private readonly tokens: InvitationTokenKeyring | null,
     private readonly emailProvider: InvitationEmailProvider,
     private readonly protectedUid: string | null,
-    private readonly now: () => Timestamp = () => Timestamp.now()
+    private readonly now: () => Timestamp = () => Timestamp.now(),
+    private readonly googleWorkspaceDomain: string | null = null
   ) {}
 
   async create(input: {
@@ -111,6 +114,12 @@ export class InvitationService {
     if (!parsed.success) throw new ApiError(400, "VALIDATION_ERROR", parsed.error.issues[0]?.message ?? "Datos no válidos.");
 
     const request = parsed.data;
+    if (request.verificationMethod === "googleWorkspace") {
+      if (!this.googleWorkspaceDomain) throw new ApiError(503, "INTERNAL_ERROR", "La configuración del dominio Workspace no está disponible.");
+      if (!request.email.endsWith(`@${this.googleWorkspaceDomain}`)) {
+        throw new ApiError(400, "VALIDATION_ERROR", "El correo del perfil no pertenece al dominio Workspace autorizado.");
+      }
+    }
     const invitationId = key.data;
     const uid = deterministicUid(invitationId);
     if (uid === this.protectedUid || uid === input.principal.uid) throw new ApiError(409, "PROTECTED_ACCOUNT", "La cuenta está protegida.");
@@ -165,6 +174,7 @@ export class InvitationService {
         email: request.email,
         normalizedEmail: request.email,
         displayName: request.displayName,
+        ...(request.verificationMethod ? { verificationMethod: request.verificationMethod } : {}),
         uid,
         status: "provisioning",
         token: { hash: material.hash, generation: 1, salt: material.salt, keyVersion: material.keyVersion, issuedAt: timestamp, expiresAt },
@@ -669,6 +679,15 @@ export class InvitationService {
           pendingOperationId: null,
           version: 1
         }));
+      }
+      if (input.request.verificationMethod === "googleWorkspace") {
+        if (!this.googleWorkspaceDomain) throw new ApiError(503, "INTERNAL_ERROR", "La configuración del dominio Workspace no está disponible.");
+        const persistedEmail = profileSnapshot.exists
+          ? userDocumentSchema.parse(profileSnapshot.data()).email
+          : input.request.email;
+        if (!persistedEmail.toLowerCase().endsWith(`@${this.googleWorkspaceDomain}`)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "El correo del perfil no pertenece al dominio Workspace autorizado.");
+        }
       }
       transaction.update(input.invitationRef, { status: "pending_delivery", updatedAt: timestamp, revision: invitation.revision + 1 });
       transaction.update(input.uniqueRef, { state: "active", updatedAt: timestamp });

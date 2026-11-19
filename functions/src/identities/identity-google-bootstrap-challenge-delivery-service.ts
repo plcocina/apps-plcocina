@@ -289,6 +289,7 @@ export class GoogleBootstrapChallengeDeliveryService {
     return invitation.invitationId === invitationId && invitation.token !== null
       && effectiveInvitationStatus(invitation, now.toMillis()) === "active"
       && invitation.token.expiresAt.toMillis() > now.toMillis() && invitation.expiresAt.toMillis() > now.toMillis()
-      && this.invitationTokens.verify(token, invitation.token.hash);
+      && this.invitationTokens.verify(token, invitation.token.hash)
+      && invitation.verificationMethod === "googleWorkspace";
   }
 }

@@ -124,6 +124,7 @@ export class InvitationGoogleProofService {
     const now = this.now().toMillis();
     return invitation.token !== null && effectiveInvitationStatus(invitation, now) === "active"
       && invitation.token.expiresAt.toMillis() > now && invitation.expiresAt.toMillis() > now
-      && this.tokens.verify(token, invitation.token.hash);
+      && this.tokens.verify(token, invitation.token.hash)
+      && invitation.verificationMethod === "googleWorkspace";
   }
 }

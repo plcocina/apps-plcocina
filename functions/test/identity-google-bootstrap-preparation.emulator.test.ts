@@ -59,7 +59,7 @@ async function fixture() {
     phoneVerifiedAt: null, emailVerifiedAt: null, activationStatus: "pending", credentialRevision: 1, authorizationRevision: 1,
     sessionValidAfter: issuedAt, createdAt: issuedAt, createdBy: adminUid, updatedAt: issuedAt, updatedBy: adminUid,
     revision: 1, pendingOperationId: null, version: 2 });
-  await db.collection("invitations").doc(invitationId).set({ invitationId, email, normalizedEmail: email, displayName: "Empleado", uid,
+  await db.collection("invitations").doc(invitationId).set({ invitationId, email, normalizedEmail: email, displayName: "Empleado", verificationMethod: "googleWorkspace", uid,
     status: "active", token: { hash: token.hash, generation: 1, salt: token.salt, keyVersion: token.keyVersion, issuedAt, expiresAt },
     delivery: { provider: "simulated", status: "accepted", idempotencyKey: `invitation/${invitationId}/generation/1`, providerMessageId: null,
       templateVersion: 1, firstAttemptAt: issuedAt, retryUntil: null, sentAt: issuedAt, deliveredAt: issuedAt, failureCode: null },
@@ -236,6 +236,19 @@ describe("invitation-scoped B4 challenge delivery", () => {
     expect((await db.collection("users").doc(f.uid).get()).data()).toMatchObject({ authDisabled: true, status: "invited" });
   });
 
+  it.each(["sms", "email", "missing"] as const)("does not recover a Challenge for a %s invitation", async (method) => {
+    const f = await preparedChallenge();
+    const invitationRef = db.collection("invitations").doc(f.invitationId);
+    if (method === "missing") {
+      const legacy = (await invitationRef.get()).data()!; delete legacy.verificationMethod; await invitationRef.set(legacy);
+    } else await invitationRef.update({ verificationMethod: method });
+    await expect(deliveryService().recover({ invitationId: f.invitationId, token: f.invitationToken.token }))
+      .rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    expect((await db.collection("identityAuthChallenges").doc(f.issued.challengeId).get()).data()?.state).toBe("issued");
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+    expect((await db.collection("users").doc(f.uid).get()).data()).toMatchObject({ status: "invited", authDisabled: true });
+  });
+
   it("does not deliver a challenge through another invitation for the same UID", async () => {
     const f = await preparedChallenge();
     const otherInvitationId = randomUUID(); const otherToken = invitationTokens.issue(otherInvitationId, 1);
@@ -352,6 +365,14 @@ describe("invitation-scoped B4 challenge finalization", () => {
       .toEqual(idempotencyAfter.docs.map((document) => document.data()));
     expect((await transitionAuditRef.get()).data()).toEqual(auditAfter.data());
     expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+
+    const replayCertificates = new MutatingCertificates(async () => {
+      await db.collection("invitations").doc(f.invitationId).update({ verificationMethod: "email" });
+    });
+    await expect(deliveryService().verifyAndConsume(body, bootstrapComposition(replayCertificates)))
+      .rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    expect((await db.collection("identityAuthChallenges").doc(f.issued.challengeId).get()).data()).toEqual(challengeAfter.data());
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
   });
 
   it("rejects a wrong state and the first-stage token without consumption writes", async () => {
@@ -377,6 +398,15 @@ describe("invitation-scoped B4 challenge finalization", () => {
     await expectNoConsumption(resent, input(resent, { token: replacement.token }), "PROOF_NOT_FOUND");
   });
 
+  it.each(["sms", "email", "missing"] as const)("does not finalize a Google proof for a %s invitation", async (method) => {
+    const f = await preparedChallenge();
+    const invitationRef = db.collection("invitations").doc(f.invitationId);
+    if (method === "missing") {
+      const legacy = (await invitationRef.get()).data()!; delete legacy.verificationMethod; await invitationRef.set(legacy);
+    } else await invitationRef.update({ verificationMethod: method });
+    await expectNoConsumption(f, input(f), "INVITATION_INVALID");
+  });
+
   it("rechecks the invitation in E5D2's transaction if a resend races with E3B verification", async () => {
     const f = await preparedChallenge();
     const replacement = invitationTokens.issue(f.invitationId, 2);
@@ -385,6 +415,14 @@ describe("invitation-scoped B4 challenge finalization", () => {
       await db.collection("invitations").doc(f.invitationId).update({ token: { hash: replacement.hash, generation: 2,
         salt: replacement.salt, keyVersion: replacement.keyVersion, issuedAt: clock(), expiresAt }, expiresAt,
         resendCount: 1, revision: 2 });
+    });
+    await expectNoConsumption(f, input(f), "INVITATION_INVALID", certificates);
+  });
+
+  it("rechecks verificationMethod in E5D2's transaction after Google verification", async () => {
+    const f = await preparedChallenge();
+    const certificates = new MutatingCertificates(async () => {
+      await db.collection("invitations").doc(f.invitationId).update({ verificationMethod: "sms" });
     });
     await expectNoConsumption(f, input(f), "INVITATION_INVALID", certificates);
   });

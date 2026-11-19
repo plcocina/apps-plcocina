@@ -43,7 +43,11 @@ export class InvitationAcceptanceService {
     if (!parsed.success) throw this.invalidInvitation();
     await this.consumeRateLimit("validate", parsed.data.invitationId, sourceIdentifier);
     const invitation = await this.loadValidInvitation(parsed.data.invitationId, parsed.data.token);
-    return { valid: true as const, expiresAt: invitation.expiresAt.toDate().toISOString() };
+    return {
+      valid: true as const,
+      expiresAt: invitation.expiresAt.toDate().toISOString(),
+      ...(invitation.verificationMethod ? { verificationMethod: invitation.verificationMethod } : {})
+    };
   }
 
   async establishPassword(body: unknown, sourceIdentifier: string, requestId: string) {
@@ -55,6 +59,7 @@ export class InvitationAcceptanceService {
     }
     await this.consumeRateLimit("establish", parsed.data.invitationId, sourceIdentifier);
     const invitation = await this.loadValidInvitation(parsed.data.invitationId, parsed.data.token);
+    if (invitation.verificationMethod === "googleWorkspace") throw this.invalidInvitation();
     const authUser = await this.directory.getUser(invitation.uid).catch((error) => {
       if (authCode(error) === "auth/user-not-found") throw this.invalidInvitation();
       throw error;
@@ -74,6 +79,7 @@ export class InvitationAcceptanceService {
       if (!invitationSnapshot.exists) throw this.invalidInvitation();
       const current = invitationDocumentSchema.parse(invitationSnapshot.data());
       this.assertToken(current, parsed.data.token, timestamp);
+      if (current.verificationMethod === "googleWorkspace") throw this.invalidInvitation();
       if (current.pendingOperationId || current.consumeOperationId) throw this.invalidInvitation();
       const profile = userDocumentSchema.safeParse(profileSnapshot.data());
       if (!profile.success || profile.data.status !== "invited" || profile.data.normalizedEmail !== current.normalizedEmail) throw this.invalidInvitation();
@@ -116,6 +122,7 @@ export class InvitationAcceptanceService {
       if (!invitationSnapshot.exists) throw this.invalidInvitation();
       const invitation = invitationDocumentSchema.parse(invitationSnapshot.data());
       if (invitation.uid !== principal.uid || invitation.normalizedEmail !== principal.email || authUser.email?.toLowerCase() !== invitation.normalizedEmail) throw this.invalidInvitation();
+      if (invitation.verificationMethod === "googleWorkspace") throw this.invalidInvitation();
       if (invitation.status === "accepted") return { status: "accepted" as const, acceptedAt: invitation.acceptedAt!.toDate().toISOString() };
       if (invitation.pendingOperationId) throw this.invalidInvitation();
       if (effectiveInvitationStatus(invitation, timestamp.toMillis()) !== "password_set" || !invitation.confirmationExpiresAt || invitation.confirmationExpiresAt.toMillis() <= timestamp.toMillis()) throw this.invalidInvitation();

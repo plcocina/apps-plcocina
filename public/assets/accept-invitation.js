@@ -3,7 +3,11 @@ import {
   InvitationApiError,
   confirmInvitation,
   establishInvitationPassword,
-  validateInvitation
+  recoverInvitationGoogleChallenge,
+  startInvitationGoogleProof,
+  validateInvitation,
+  verifyInvitationGoogleChallenge,
+  verifyInvitationGoogleProof
 } from "./accept-invitation-api.js";
 
 const INVITATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -39,18 +43,53 @@ function errorMessage(error) {
   return "No fue posible completar la activación. Intenta nuevamente.";
 }
 
+function loadGoogleIdentitySdk(documentRef) {
+  const identity = () => globalThis.google?.accounts?.id;
+  if (identity()) return Promise.resolve(identity());
+  return new Promise((resolve, reject) => {
+    let script = documentRef.getElementById("google-identity-services-sdk");
+    if (!script) {
+      script = documentRef.createElement("script");
+      script.id = "google-identity-services-sdk";
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      script.defer = true;
+      documentRef.head.append(script);
+    }
+    script.addEventListener("load", () => {
+      if (identity()) resolve(identity());
+      else { script.remove(); reject(new Error("GOOGLE_SDK_UNAVAILABLE")); }
+    }, { once: true });
+    script.addEventListener("error", () => { script.remove(); reject(new Error("GOOGLE_SDK_UNAVAILABLE")); }, { once: true });
+  });
+}
+
 export async function startAcceptance(initialCredentials, dependencies = {}) {
   const documentRef = dependencies.documentRef ?? document;
-  const api = dependencies.api ?? { validateInvitation, establishInvitationPassword, confirmInvitation };
+  const api = dependencies.api ?? {
+    validateInvitation,
+    establishInvitationPassword,
+    confirmInvitation,
+    startInvitationGoogleProof,
+    verifyInvitationGoogleProof,
+    recoverInvitationGoogleChallenge,
+    verifyInvitationGoogleChallenge
+  };
+  const googleClientId = dependencies.googleClientId ?? firebaseConfig.googleIdentityClientId ?? "";
   let invitationId = initialCredentials?.invitationId ?? "";
   let token = initialCredentials?.token ?? "";
   let passwordEstablished = false;
   let busy = false;
   let authContext = null;
+  let googleBusy = false;
+  let googleEpoch = 0;
+  let googlePhase = "initial";
+  let googleChallenge = null;
 
   const loadingView = documentRef.getElementById("loading-view");
   const passwordView = documentRef.getElementById("password-view");
   const resultView = documentRef.getElementById("result-view");
+  const googleView = documentRef.getElementById("google-view");
   const status = documentRef.getElementById("acceptance-status");
   const form = documentRef.getElementById("password-form");
   const emailInput = documentRef.getElementById("invited-email");
@@ -65,9 +104,17 @@ export async function startAcceptance(initialCredentials, dependencies = {}) {
   const retryButton = documentRef.getElementById("retry-button");
   const portalLink = documentRef.getElementById("portal-link");
   const steps = ["step-verify", "step-password", "step-confirm"].map((id) => documentRef.getElementById(id));
+  const passwordStepLabel = documentRef.getElementById("step-password-label");
+  const confirmStepLabel = documentRef.getElementById("step-confirm-label");
+  const googleTitle = documentRef.getElementById("google-title");
+  const googleStatus = documentRef.getElementById("google-status");
+  const googleButtonSlot = documentRef.getElementById("google-button-slot");
+  const googleStartButton = documentRef.getElementById("google-start-button");
+  const googleRecoverButton = documentRef.getElementById("google-recover-button");
+  const googleRetryButton = documentRef.getElementById("google-retry-button");
 
   function showOnly(view) {
-    for (const candidate of [loadingView, passwordView, resultView]) candidate.hidden = candidate !== view;
+    for (const candidate of [loadingView, passwordView, googleView, resultView]) candidate.hidden = candidate !== view;
   }
 
   function setStep(index) {
@@ -94,6 +141,176 @@ export async function startAcceptance(initialCredentials, dependencies = {}) {
     for (const input of [emailInput, passwordInput, confirmationInput]) input.disabled = pending;
     continueButton.disabled = pending;
     continueButton.textContent = pending ? "Protegiendo tu cuenta…" : (passwordEstablished ? "Confirmar cuenta" : "Establecer contraseña y confirmar");
+  }
+
+  function showGoogleView(title, message) {
+    googleTitle.textContent = title;
+    googleStatus.textContent = message;
+    showOnly(googleView);
+  }
+
+  async function googleIdentitySdk() {
+    if (dependencies.googleIdentity) return dependencies.googleIdentity.accounts?.id ?? dependencies.googleIdentity;
+    return (dependencies.loadGoogleIdentitySdk ?? loadGoogleIdentitySdk)(documentRef);
+  }
+
+  function clearGoogleChallenge() {
+    googleEpoch += 1;
+    googleChallenge = null;
+    googleButtonSlot.replaceChildren();
+  }
+
+  async function renderGoogleButton(challenge, phase) {
+    const clientId = typeof googleClientId === "string" ? googleClientId.trim() : "";
+    if (!clientId) throw new Error("GOOGLE_CLIENT_ID_MISSING");
+    const googleIdentity = await googleIdentitySdk();
+    if (!googleIdentity?.initialize || !googleIdentity?.renderButton) throw new Error("GOOGLE_SDK_UNAVAILABLE");
+    const epoch = ++googleEpoch;
+    googleChallenge = { ...challenge, phase, epoch };
+    googlePhase = phase;
+    googleButtonSlot.replaceChildren();
+    googleIdentity.initialize({
+      client_id: clientId,
+      nonce: challenge.nonce,
+      callback: (credentialResponse) => {
+        const current = googleChallenge;
+        if (googleBusy || !current || current.epoch !== epoch || current.phase !== phase) return;
+        const credential = credentialResponse?.credential;
+        if (typeof credential !== "string" || !credential) {
+          googleStatus.textContent = "Google no devolvió una credencial válida. Intenta nuevamente.";
+          return;
+        }
+        void submitGoogleCredential(epoch, phase, credential);
+      }
+    });
+    googleIdentity.renderButton(googleButtonSlot, {
+      theme: "outline", size: "large", type: "standard", text: "continue_with", shape: "rectangular", width: 280
+    });
+  }
+
+  async function beginGoogleProof() {
+    if (googleBusy || googlePhase !== "initial") return;
+    googleBusy = true;
+    googleStartButton.hidden = true;
+    googleRecoverButton.hidden = true;
+    googleRetryButton.hidden = true;
+    googleRetryButton.disabled = true;
+    showGoogleView("Verifica tu identidad con Google", "Preparando la primera verificación…");
+    setStep(0);
+    clearGoogleChallenge();
+    try {
+      const clientId = typeof googleClientId === "string" ? googleClientId.trim() : "";
+      if (!clientId) throw new Error("GOOGLE_CLIENT_ID_MISSING");
+      await googleIdentitySdk();
+      const challenge = await api.startInvitationGoogleProof(invitationId, token);
+      if (!googleBusy) return;
+      await renderGoogleButton(challenge, "initial");
+      googleStatus.textContent = "Usa el botón oficial de Google para verificar tu identidad.";
+    } catch (error) {
+      clearGoogleChallenge();
+      googleStatus.textContent = error?.message === "GOOGLE_CLIENT_ID_MISSING"
+        ? "La verificación de Google no está configurada en este portal. Contacta al administrador para continuar."
+        : "No pudimos cargar Google o iniciar la verificación. Comprueba tu conexión e intenta nuevamente.";
+      googleRetryButton.hidden = error?.message === "GOOGLE_CLIENT_ID_MISSING";
+      googleRecoverButton.hidden = error?.message === "GOOGLE_CLIENT_ID_MISSING";
+      googleStartButton.hidden = true;
+    } finally {
+      googleBusy = false;
+      googleRetryButton.disabled = false;
+    }
+  }
+
+  async function recoverGoogleChallenge() {
+    if (googleBusy || !["initial", "review"].includes(googlePhase)) return;
+    const phaseBeforeRecovery = googlePhase;
+    googleBusy = true;
+    googleRecoverButton.disabled = true;
+    googleRetryButton.hidden = true;
+    googleStatus.textContent = "Consultando la revisión del administrador…";
+    try {
+      const clientId = typeof googleClientId === "string" ? googleClientId.trim() : "";
+      if (!clientId) throw new Error("GOOGLE_CLIENT_ID_MISSING");
+      await googleIdentitySdk();
+      const challenge = await api.recoverInvitationGoogleChallenge(invitationId, token);
+      if (!googleBusy || phaseBeforeRecovery !== googlePhase) return;
+      clearGoogleChallenge();
+      await renderGoogleButton(challenge, "challenge");
+      setStep(2);
+      googleTitle.textContent = "Completa la verificación de Google";
+      googleStatus.textContent = "La segunda verificación está lista. Usa el botón oficial de Google para continuar.";
+      googleStartButton.hidden = true;
+      googleRecoverButton.hidden = true;
+    } catch (error) {
+      googlePhase = phaseBeforeRecovery;
+      if (error?.message === "GOOGLE_CLIENT_ID_MISSING") {
+        googleStatus.textContent = "La verificación de Google no está configurada en este portal. Contacta al administrador para continuar.";
+        googleStartButton.hidden = true;
+        googleRecoverButton.hidden = true;
+      } else if (error?.message === "GOOGLE_SDK_UNAVAILABLE") {
+        googleStatus.textContent = "No pudimos cargar Google. Comprueba tu conexión e intenta nuevamente.";
+        googleStartButton.hidden = false;
+        googleRecoverButton.hidden = false;
+      } else {
+        googleStatus.textContent = "No pudimos consultar el estado todavía. Puedes volver a consultar en unos momentos.";
+        googleStartButton.hidden = phaseBeforeRecovery !== "initial";
+        googleRecoverButton.hidden = false;
+      }
+    } finally {
+      googleBusy = false;
+      googleRecoverButton.disabled = false;
+    }
+  }
+
+  async function submitGoogleCredential(epoch, phase, googleIdToken) {
+    const challenge = googleChallenge;
+    if (googleBusy || !challenge || challenge.epoch !== epoch || challenge.phase !== phase) return;
+    googleBusy = true;
+    googleStatus.textContent = "Verificando tu identidad de forma segura…";
+    googleRecoverButton.disabled = true;
+    try {
+      if (phase === "initial") {
+        await api.verifyInvitationGoogleProof(invitationId, token, challenge.challengeId, challenge.nonce, googleIdToken);
+        if (googleChallenge?.epoch !== epoch) return;
+        clearGoogleChallenge();
+        googlePhase = "review";
+        setStep(1);
+        googleTitle.textContent = "Verificación inicial completada";
+        googleStatus.textContent = "Verificación inicial completada. Falta la revisión del administrador.";
+        googleStartButton.hidden = true;
+        googleRecoverButton.textContent = "Volver a consultar";
+        googleRecoverButton.hidden = false;
+      } else {
+        const result = await api.verifyInvitationGoogleChallenge(invitationId, token, challenge.challengeId, challenge.state, googleIdToken);
+        if (googleChallenge?.epoch !== epoch || result?.state !== "google_proof_verified") return;
+        clearGoogleChallenge();
+        googlePhase = "complete";
+        googleBusy = false;
+        token = "";
+        invitationId = "";
+        setStep(3);
+        googleTitle.textContent = "Identidad verificada";
+        googleStatus.textContent = "Identidad verificada. Tu cuenta está pendiente de activación.";
+        googleRecoverButton.hidden = true;
+      }
+    } catch {
+      if (googleChallenge?.epoch !== epoch) return;
+      if (phase === "initial") {
+        clearGoogleChallenge();
+        googlePhase = "initial";
+        googleStatus.textContent = "No pudimos completar la primera verificación. Puedes intentarlo nuevamente.";
+        googleRetryButton.hidden = false;
+        googleRecoverButton.hidden = false;
+        googleStartButton.hidden = true;
+      } else {
+        clearGoogleChallenge();
+        googlePhase = "review";
+        googleStatus.textContent = "No pudimos completar la segunda verificación. Vuelve a consultar para continuar.";
+        googleRecoverButton.hidden = false;
+      }
+    } finally {
+      googleBusy = false;
+      googleRecoverButton.disabled = false;
+    }
   }
 
   async function loadFirebaseAuth() {
@@ -129,7 +346,24 @@ export async function startAcceptance(initialCredentials, dependencies = {}) {
       return;
     }
     try {
-      await api.validateInvitation(invitationId, token);
+      const invitation = await api.validateInvitation(invitationId, token);
+      if (invitation.verificationMethod === "googleWorkspace") {
+        passwordStepLabel.textContent = "Revisión";
+        confirmStepLabel.textContent = "Google";
+        googlePhase = "initial";
+        showGoogleView("Verifica tu identidad con Google", "Inicia la primera verificación o vuelve a consultar si ya completaste ese paso.");
+        setStep(0);
+        const clientId = typeof googleClientId === "string" ? googleClientId.trim() : "";
+        if (!clientId) {
+          googleStatus.textContent = "La verificación de Google no está configurada en este portal. Contacta al administrador para continuar.";
+          googleStartButton.hidden = true;
+          googleRecoverButton.hidden = true;
+        } else {
+          googleStartButton.hidden = false;
+          googleRecoverButton.hidden = false;
+        }
+        return;
+      }
       setStep(1);
       showOnly(passwordView);
       emailInput.focus();
@@ -141,6 +375,11 @@ export async function startAcceptance(initialCredentials, dependencies = {}) {
   }
 
   retryButton.addEventListener("click", () => { if (!busy && token) void verify(); });
+  googleStartButton.addEventListener("click", () => { void beginGoogleProof(); });
+  googleRecoverButton.addEventListener("click", () => { void recoverGoogleChallenge(); });
+  googleRetryButton.addEventListener("click", () => {
+    if (!googleBusy && googlePhase === "initial") void beginGoogleProof();
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();

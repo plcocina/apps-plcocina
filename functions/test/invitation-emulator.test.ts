@@ -3,6 +3,9 @@ import { deleteApp, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import request from "supertest";
+import type { DecodedIdToken } from "firebase-admin/auth";
+import { createAdminApp } from "../src/app.js";
 import type { AdminPrincipal } from "../src/auth/require-super-admin.js";
 import { DisabledInvitationEmailProvider, SimulatedInvitationEmailProvider, type InvitationEmailProvider } from "../src/invitations/invitation-email-provider.js";
 import { InvitationService } from "../src/invitations/invitation-service.js";
@@ -30,14 +33,14 @@ function setup(firestore: Firestore = db, now: () => Timestamp = () => Timestamp
   return {
     provider,
     tokens,
-    service: new InvitationService(userDirectory, firestore, tokens, provider, "protected-super-admin", now),
+    service: new InvitationService(userDirectory, firestore, tokens, provider, "protected-super-admin", now, "plcocina.com"),
     acceptance: new InvitationAcceptanceService(userDirectory, firestore, tokens, "protected-super-admin", now)
   };
 }
 
-function create(service: InvitationService, email: string, key = randomUUID()) {
+function create(service: InvitationService, email: string, key = randomUUID(), verificationMethod?: "sms" | "email" | "googleWorkspace") {
   return service.create({
-    body: { displayName: "Usuario Invitado", email },
+    body: { displayName: "Usuario Invitado", email, ...(verificationMethod ? { verificationMethod } : {}) },
     idempotencyKey: key,
     principal,
     requestId: randomUUID()
@@ -54,6 +57,19 @@ function revoke(service: InvitationService, invitationId: string, expectedRevisi
 
 function establish(acceptance: InvitationAcceptanceService, invitationId: string, token: string, password = "C0ntraseña-segura-2026!", source = randomUUID()) {
   return acceptance.establishPassword({ invitationId, token, password }, source, randomUUID());
+}
+
+function httpApp() {
+  return createAdminApp({
+    verifyIdToken: async () => ({ uid: principal.uid, sub: principal.uid, email: principal.email, auth_time: 1, iat: 1, super_admin: true } as DecodedIdToken),
+    origins: new Set(["https://apps.plcocina.com"]),
+    firestore: db,
+    userDirectory: directory,
+    protectedSuperAdminUid: "protected-super-admin",
+    googleWorkspaceDomain: "plcocina.com",
+    invitationTokens: new InvitationTokenKeyring(new Map([[1, Buffer.alloc(32, 7)]]), 1),
+    invitationEmailProvider: new SimulatedInvitationEmailProvider()
+  });
 }
 
 beforeAll(() => {
@@ -77,6 +93,90 @@ beforeAll(() => {
 afterAll(async () => { await deleteApp(firebaseApp); });
 
 describe("C1/C2 invitation provisioning with emulators", () => {
+  it("accepts verificationMethod through the administrative HTTP route and persists it", async () => {
+    const email = `http-admin-${randomUUID()}@example.net`;
+    const response = await request(httpApp()).post("/api/admin/invitations")
+      .set("Authorization", "Bearer admin-token")
+      .set("Idempotency-Key", randomUUID())
+      .send({ displayName: "Invitado HTTP", email, verificationMethod: "email" });
+    expect(response.status).toBe(201);
+    const persisted = await db.collection("invitations").doc(response.body.data.invitationId).get();
+    expect(persisted.data()?.verificationMethod).toBe("email");
+  });
+
+  it("returns stored verification methods on public validation and omits them for legacy and invalid credentials", async () => {
+    const app = httpApp();
+    for (const method of ["sms", "email", "googleWorkspace"] as const) {
+      const email = method === "googleWorkspace" ? `${method}-${randomUUID()}@plcocina.com` : `${method}-${randomUUID()}@example.net`;
+      const fixture = setup();
+      const created = await create(fixture.service, email, randomUUID(), method);
+      const stored = (await db.collection("invitations").doc(created.invitationId).get()).data()!;
+      const token = fixture.provider.deliveries.at(-1)?.message.token;
+      expect(stored.verificationMethod).toBe(method);
+      const response = await request(app).post("/api/invitations/validate").send({ invitationId: created.invitationId, token });
+      expect(response.status).toBe(200);
+      expect(response.body.data).toMatchObject({ valid: true, expiresAt: expect.any(String), verificationMethod: method });
+    }
+    const legacyFixture = setup();
+    const legacy = await create(legacyFixture.service, `legacy-http-${randomUUID()}@example.net`);
+    const legacyRef = db.collection("invitations").doc(legacy.invitationId);
+    const legacyDocument = (await legacyRef.get()).data()!;
+    delete legacyDocument.verificationMethod;
+    await legacyRef.set(legacyDocument);
+    const legacyToken = legacyFixture.provider.deliveries.at(-1)!.message.token;
+    const legacyResponse = await request(app).post("/api/invitations/validate").send({ invitationId: legacy.invitationId, token: legacyToken });
+    expect(legacyResponse.status).toBe(200);
+    expect(legacyResponse.body.data).toMatchObject({ valid: true, expiresAt: expect.any(String) });
+    expect(legacyResponse.body.data).not.toHaveProperty("verificationMethod");
+    const invalid = await request(app).post("/api/invitations/validate").send({ invitationId: legacy.invitationId, token: "A".repeat(43) });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.data).toBeUndefined();
+
+    const expiredFixture = setup();
+    const expired = await create(expiredFixture.service, `expired-http-${randomUUID()}@example.net`, randomUUID(), "sms");
+    const past = Timestamp.fromMillis(Date.now() - 1_000);
+    await db.collection("invitations").doc(expired.invitationId).update({ expiresAt: past, "token.expiresAt": past });
+    const expiredResponse = await request(app).post("/api/invitations/validate").send({ invitationId: expired.invitationId, token: expiredFixture.provider.deliveries.at(-1)!.message.token });
+    expect(expiredResponse.status).toBe(400);
+    expect(expiredResponse.body.data).toBeUndefined();
+
+    const revokedFixture = setup();
+    const revoked = await create(revokedFixture.service, `revoked-http-${randomUUID()}@example.net`, randomUUID(), "email");
+    const revokedToken = revokedFixture.provider.deliveries.at(-1)!.message.token;
+    await revoke(revokedFixture.service, revoked.invitationId, revoked.revision);
+    const revokedResponse = await request(app).post("/api/invitations/validate").send({ invitationId: revoked.invitationId, token: revokedToken });
+    expect(revokedResponse.status).toBe(400);
+    expect(revokedResponse.body.data).toBeUndefined();
+  });
+  it("persists Google Workspace verification on creation and preserves it on resend", async () => {
+    const { service } = setup();
+    const created = await create(service, `google-${randomUUID()}@plcocina.com`, randomUUID(), "googleWorkspace");
+    const invitationRef = db.collection("invitations").doc(created.invitationId);
+    expect((await invitationRef.get()).data()?.verificationMethod).toBe("googleWorkspace");
+    const resent = await resend(service, created.invitationId, created.revision);
+    expect((await invitationRef.get()).data()?.verificationMethod).toBe("googleWorkspace");
+    expect(resent.status).toBe("active");
+  });
+
+  it("rejects Google Workspace for a profile without an eligible corporate email", async () => {
+    const { service, provider } = setup();
+    await expect(create(service, `outside-${randomUUID()}@example.net`, randomUUID(), "googleWorkspace"))
+      .rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 });
+    expect(provider.deliveries).toHaveLength(0);
+  });
+
+  it("preserves the absence of verificationMethod for an earlier invitation on resend", async () => {
+    const { service } = setup();
+    const created = await create(service, `legacy-${randomUUID()}@example.net`);
+    const invitationRef = db.collection("invitations").doc(created.invitationId);
+    // Model a pre-field document by rewriting it without the optional property.
+    const legacy = (await invitationRef.get()).data()!;
+    delete legacy.verificationMethod;
+    await invitationRef.set(legacy);
+    await resend(service, created.invitationId, created.revision);
+    expect((await invitationRef.get()).data()).not.toHaveProperty("verificationMethod");
+  });
+
   it("creates a disabled passwordless account, profile and hashed-token invitation", async () => {
     const { service, provider } = setup();
     const email = `invite-${randomUUID()}@outside.example`;
@@ -443,6 +543,61 @@ describe("C3 invitation lifecycle with emulators", () => {
 });
 
 describe("C4 invitation acceptance with emulators", () => {
+  it.each(["sms", "email"] as const)("keeps the %s acceptance path available", async (method) => {
+    const fixture = setup();
+    const email = `${method}-accept-${randomUUID()}@example.net`;
+    const created = await create(fixture.service, email, randomUUID(), method);
+    await establish(fixture.acceptance, created.invitationId, fixture.provider.deliveries[0]!.message.token);
+    const result = await fixture.acceptance.confirm(created.invitationId, {
+      uid: created.uid, email, superAdmin: false, decoded: {} as never
+    }, randomUUID());
+    expect(result.status).toBe("accepted");
+    expect((await db.collection("invitations").doc(created.invitationId).get()).data())
+      .toMatchObject({ verificationMethod: method, status: "accepted" });
+    expect((await db.collection("users").doc(created.uid).get()).data())
+      .toMatchObject({ status: "active", authDisabled: false, invitationStatus: "accepted" });
+  });
+
+  it("rejects Google invitations through password establishment before Auth or Firestore effects", async () => {
+    const fixture = setup();
+    const created = await create(fixture.service, `google-accept-${randomUUID()}@plcocina.com`, randomUUID(), "googleWorkspace");
+    const token = fixture.provider.deliveries[0]!.message.token;
+    const invitationRef = db.collection("invitations").doc(created.invitationId);
+    const profileRef = db.collection("users").doc(created.uid);
+    const [invitationBefore, profileBefore, authBefore, operationsBefore] = await Promise.all([
+      invitationRef.get(), profileRef.get(), getAuth(firebaseApp).getUser(created.uid),
+      db.collection("adminOperations").where("invitationId", "==", created.invitationId).get()
+    ]);
+    await expect(establish(fixture.acceptance, created.invitationId, token)).rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    const response = await request(httpApp()).post("/api/invitations/establish-password")
+      .send({ invitationId: created.invitationId, token, password: "Google-Path-Blocked-2026!" });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("INVITATION_INVALID");
+    expect((await invitationRef.get()).data()).toEqual(invitationBefore.data());
+    expect((await profileRef.get()).data()).toEqual(profileBefore.data());
+    expect((await getAuth(firebaseApp).getUser(created.uid)).toJSON()).toEqual(authBefore.toJSON());
+    expect((await db.collection("adminOperations").where("invitationId", "==", created.invitationId).get()).docs.map((doc) => doc.data()))
+      .toEqual(operationsBefore.docs.map((doc) => doc.data()));
+  });
+
+  it("rejects completing a Google invitation through confirmation without activating the profile", async () => {
+    const fixture = setup();
+    const created = await create(fixture.service, `google-confirm-${randomUUID()}@plcocina.com`);
+    await establish(fixture.acceptance, created.invitationId, fixture.provider.deliveries[0]!.message.token);
+    await db.collection("invitations").doc(created.invitationId).update({ verificationMethod: "googleWorkspace" });
+    const invitationRef = db.collection("invitations").doc(created.invitationId);
+    const profileRef = db.collection("users").doc(created.uid);
+    const [invitationBefore, profileBefore, authBefore] = await Promise.all([
+      invitationRef.get(), profileRef.get(), getAuth(firebaseApp).getUser(created.uid)
+    ]);
+    await expect(fixture.acceptance.confirm(created.invitationId, {
+      uid: created.uid, email: created.email, superAdmin: false, decoded: {} as never
+    }, randomUUID())).rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    expect((await invitationRef.get()).data()).toEqual(invitationBefore.data());
+    expect((await profileRef.get()).data()).toEqual(profileBefore.data());
+    expect((await getAuth(firebaseApp).getUser(created.uid)).toJSON()).toEqual(authBefore.toJSON());
+  });
+
   it("validates without consuming a current token and rejects unknown tokens uniformly", async () => {
     const { service, acceptance, provider } = setup();
     const created = await create(service, `validate-${randomUUID()}@example.net`);

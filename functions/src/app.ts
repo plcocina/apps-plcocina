@@ -37,6 +37,7 @@ export type AdminApiDependencies = {
   firestore?: Firestore;
   userDirectory?: UserDirectory;
   protectedSuperAdminUid?: string | null;
+  googleWorkspaceDomain?: string | null;
   invitationTokens?: InvitationTokenKeyring | null;
   invitationEmailProvider?: InvitationEmailProvider;
   resendWebhook?: { enabled: boolean; secret?: string; replayStore?: WebhookReplayStore };
@@ -85,7 +86,9 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
       dependencies.firestore,
       dependencies.invitationTokens ?? null,
       dependencies.invitationEmailProvider ?? new DisabledInvitationEmailProvider(),
-      dependencies.protectedSuperAdminUid ?? null
+      dependencies.protectedSuperAdminUid ?? null,
+      undefined,
+      dependencies.googleWorkspaceDomain ?? null
     )
     : null;
   const invitationQueries = dependencies.firestore ? new InvitationQueryService(dependencies.firestore, now) : null;
