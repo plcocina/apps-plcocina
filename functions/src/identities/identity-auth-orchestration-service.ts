@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Timestamp, type Firestore } from "firebase-admin/firestore";
+import { Timestamp, type Firestore, type Transaction } from "firebase-admin/firestore";
 import { z } from "zod";
 import type { VerifiedGoogleIdentity, VerifyGoogleIdTokenInput } from "./google-token-verifier.js";
 import { createTrustedNonceContext } from "./google-token-verifier.js";
@@ -76,6 +76,17 @@ export type AuthOrchestrationPersistenceResult = Readonly<{
   automaticActivation: false;
 }>;
 
+export type AuthOrchestrationTransactionValidator = (context: {
+  transaction: Transaction;
+  now: Timestamp;
+  identity: VerifiedGoogleIdentity;
+  googleSubjectHash: string;
+  operationId: string;
+  challengeId: string;
+  authorizationId: string;
+  idempotencyKey: string;
+}) => Promise<void>;
+
 function stableRequestHash(value: {
   operationId: string; challengeId: string; authorizationId: string; contextType: "trusted_session" | "google_bootstrap";
   trustedSessionId?: string;
@@ -109,7 +120,8 @@ export class IdentityAuthOrchestrationPersistenceService {
     uidSchema.parse(protectedSuperAdminUid);
   }
 
-  async verifyConsumeAndRecord(input: AuthOrchestrationPersistenceRequest): Promise<AuthOrchestrationPersistenceResult> {
+  async verifyConsumeAndRecord(input: AuthOrchestrationPersistenceRequest,
+    options: { validateTransaction?: AuthOrchestrationTransactionValidator } = {}): Promise<AuthOrchestrationPersistenceResult> {
     const request = orchestrationRequestSchema.parse(input);
     if (request.trustedAdministratorUid !== this.protectedSuperAdminUid) {
       throw new AuthOrchestrationPersistenceError("TRUSTED_CONTEXT_MISMATCH");
@@ -150,6 +162,9 @@ export class IdentityAuthOrchestrationPersistenceService {
 
     return this.db.runTransaction(async (transaction) => {
       const timestamp = this.now();
+      await options.validateTransaction?.({ transaction, now: timestamp, identity, googleSubjectHash,
+        operationId: request.operationId, challengeId: request.challengeId, authorizationId: request.authorizationId,
+        idempotencyKey: request.idempotencyKey });
       const preparedCoordination = await prepareAuthCoordinationTransition({ db: this.db, transaction,
         trustedAdministratorUid: request.trustedAdministratorUid, protectedSuperAdminUid: this.protectedSuperAdminUid,
         operationId: request.operationId, expectedRevision: request.expectedCoordinationRevision, event, now: timestamp });

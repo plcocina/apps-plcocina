@@ -26,6 +26,9 @@ import { AccessGrantService } from "./access-grants/access-grant-service.js";
 import type { InternalGoogleBootstrapComposition } from "./identities/identity-google-bootstrap-composition.js";
 import { GoogleIdentityLinkError } from "./identities/identity-linking-service.js";
 import type { IdentityLinkAuthorization } from "./identities/identity-linking-contracts.js";
+import type { InvitationGoogleProofService } from "./identities/identity-invitation-google-proof-service.js";
+import { GoogleBootstrapPreparationError, type GoogleBootstrapPreparationService } from "./identities/identity-google-bootstrap-preparation-service.js";
+import { GoogleBootstrapChallengeDeliveryError, type GoogleBootstrapChallengeDeliveryService } from "./identities/identity-google-bootstrap-challenge-delivery-service.js";
 
 export type AdminApiDependencies = {
   verifyIdToken: VerifyIdToken;
@@ -38,6 +41,9 @@ export type AdminApiDependencies = {
   invitationEmailProvider?: InvitationEmailProvider;
   resendWebhook?: { enabled: boolean; secret?: string; replayStore?: WebhookReplayStore };
   googleBootstrapComposition?: () => InternalGoogleBootstrapComposition;
+  invitationGoogleProofService?: () => InvitationGoogleProofService;
+  googleBootstrapPreparationService?: () => GoogleBootstrapPreparationService;
+  googleBootstrapChallengeDeliveryService?: () => GoogleBootstrapChallengeDeliveryService;
   bindEmployeeInvitationAuthorization?: (input: {
     authorizationId: string;
     invitationId: string;
@@ -131,6 +137,38 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     return invitationAcceptance;
   }
 
+  function invitationGoogleProofService(): InvitationGoogleProofService {
+    if (!dependencies.invitationGoogleProofService) {
+      throw new ApiError(503, "INTERNAL_ERROR", "La verificación Google no está disponible.");
+    }
+    try {
+      return dependencies.invitationGoogleProofService();
+    } catch {
+      throw new ApiError(503, "INTERNAL_ERROR", "La verificación Google no está disponible.");
+    }
+  }
+
+  function mapInvitationGoogleProofError(error: unknown, next: (error?: unknown) => void): void {
+    const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+    const name = error instanceof Error ? error.name : "";
+    if (name === "ZodError") {
+      next(new ApiError(400, "VALIDATION_ERROR", "La solicitud no es válida."));
+      return;
+    }
+    if (["INVITATION_INVALID", "PROFILE_INVALID", "CORPORATE_EMAIL_REQUIRED", "GOOGLE_EMAIL_MISMATCH",
+      "CHALLENGE_INVALID", "CHALLENGE_EXPIRED", "CHALLENGE_CONSUMED", "NONCE_INVALID", "NONCE_REQUIRED",
+      "TOKEN_MISSING", "TOKEN_MALFORMED", "TOKEN_TOO_LARGE", "SIGNATURE_INVALID", "ALGORITHM_NOT_ALLOWED",
+      "KEY_ID_UNKNOWN", "ISSUER_NOT_ALLOWED", "AUDIENCE_NOT_ALLOWED", "AUTHORIZED_PARTY_NOT_ALLOWED",
+      "TOKEN_EXPIRED", "ISSUED_AT_INVALID", "SUBJECT_INVALID", "EMAIL_INVALID", "EMAIL_NOT_VERIFIED",
+      "HOSTED_DOMAIN_MISSING", "HOSTED_DOMAIN_NOT_ALLOWED", "IDENTITY_CLAIMS_INCONSISTENT"].includes(code)) {
+      const consumed = code === "CHALLENGE_CONSUMED";
+      next(new ApiError(consumed ? 409 : 400, consumed ? "INVALID_STATE_TRANSITION" : "INVITATION_INVALID",
+        consumed ? "La verificación ya fue utilizada." : "La invitación o la verificación no es válida."));
+      return;
+    }
+    next(new ApiError(503, "INTERNAL_ERROR", "La verificación Google no está disponible."));
+  }
+
   function sourceIdentifier(request: express.Request) {
     return `${request.ip ?? "unknown"}|${request.header("user-agent") ?? "unknown"}`;
   }
@@ -220,6 +258,46 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
         return;
       }
       next(error);
+    }
+  });
+
+  app.post("/api/admin/identities/google-bootstrap/preparations", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const principal = principalFrom(request);
+      const body = z.object({ proofId: z.string().uuid() }).strict().parse(request.body);
+      if (!dependencies.googleBootstrapPreparationService) {
+        next(new ApiError(503, "INTERNAL_ERROR", "El servicio de preparación Google no está disponible."));
+        return;
+      }
+      let service: GoogleBootstrapPreparationService;
+      try { service = dependencies.googleBootstrapPreparationService(); }
+      catch { throw new ApiError(503, "INTERNAL_ERROR", "El servicio de preparación Google no está disponible."); }
+      const result = await service.prepare(body, principal);
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.status(200).json({ ok: true, data: { authorizationId: result.authorizationId, state: result.state },
+        requestId: requestIdFrom(response) });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        next(new ApiError(400, "VALIDATION_ERROR", "La solicitud no es válida."));
+        return;
+      }
+      if (error instanceof GoogleBootstrapPreparationError) {
+        if (error.code === "ADMIN_REQUIRED") {
+          next(new ApiError(403, "ADMIN_REQUIRED", "La cuenta no tiene autorización administrativa."));
+          return;
+        }
+        if (error.code === "PROOF_NOT_FOUND") {
+          next(new ApiError(404, "NOT_FOUND", "La prueba no está disponible."));
+          return;
+        }
+        if (["PROOF_INVALID", "PROOF_EXPIRED", "INVITATION_INVALID", "PROFILE_INVALID", "CORPORATE_EMAIL_REQUIRED"].includes(error.code)) {
+          next(new ApiError(400, "INVITATION_INVALID", "La prueba o invitación ya no es válida."));
+          return;
+        }
+        next(new ApiError(409, "INVALID_STATE_TRANSITION", "La preparación no puede completarse con el estado actual."));
+        return;
+      }
+      next(new ApiError(503, "INTERNAL_ERROR", "El servicio de preparación Google no está disponible."));
     }
   });
 
@@ -412,6 +490,113 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     } catch (error) { next(error); }
   });
 
+  app.post("/api/invitations/google-bootstrap/proof/start", requireHttps, async (request, response, next) => {
+    try {
+      const body = z.object({ invitationId: z.string().uuid(), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict().parse(request.body);
+      const result = await invitationGoogleProofService().start(body);
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.status(200).json({ ok: true, data: { challengeId: result.challengeId, nonce: result.nonce,
+        expiresAt: result.expiresAt.toDate().toISOString() }, requestId: requestIdFrom(response) });
+    } catch (error) { mapInvitationGoogleProofError(error, next); }
+  });
+
+  app.post("/api/invitations/google-bootstrap/proof/verify", requireHttps, async (request, response, next) => {
+    try {
+      const body = z.object({ invitationId: z.string().uuid(), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        challengeId: z.string().uuid(), nonce: z.string().min(16).max(512), googleIdToken: z.string().min(1).max(20_000) }).strict().parse(request.body);
+      const result = await invitationGoogleProofService().verify(body);
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.status(200).json({ ok: true, data: { state: result.state, verifiedAt: result.verifiedAt.toDate().toISOString() },
+        requestId: requestIdFrom(response) });
+    } catch (error) { mapInvitationGoogleProofError(error, next); }
+  });
+
+  app.post("/api/invitations/google-bootstrap/challenge/recover", requireHttps, async (request, response, next) => {
+    try {
+      const body = z.object({ invitationId: z.string().uuid(), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict().parse(request.body);
+      if (!dependencies.googleBootstrapChallengeDeliveryService) {
+        throw new ApiError(503, "INTERNAL_ERROR", "El Challenge no está disponible.");
+      }
+      let service: GoogleBootstrapChallengeDeliveryService;
+      try { service = dependencies.googleBootstrapChallengeDeliveryService(); }
+      catch { throw new ApiError(503, "INTERNAL_ERROR", "El Challenge no está disponible."); }
+      const result = await service.recover(body);
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.status(200).json({ ok: true, data: { challengeId: result.challengeId, nonce: result.nonce,
+        state: result.state, expiresAt: result.expiresAt.toDate().toISOString() }, requestId: requestIdFrom(response) });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        next(new ApiError(400, "VALIDATION_ERROR", "La solicitud no es válida."));
+        return;
+      }
+      if (error instanceof GoogleBootstrapChallengeDeliveryError) {
+        if (error.code === "INVITATION_INVALID" || error.code === "PROOF_EXPIRED") {
+          next(new ApiError(400, "INVITATION_INVALID", "La invitación o el Challenge no está disponible."));
+          return;
+        }
+        if (error.code === "PROOF_NOT_FOUND" || error.code === "PREPARATION_NOT_FOUND" || error.code === "CHALLENGE_NOT_FOUND") {
+          next(new ApiError(404, "NOT_FOUND", "El Challenge no está disponible."));
+          return;
+        }
+        if (error.code === "CHALLENGE_EXPIRED" || error.code === "CHALLENGE_CONSUMED" || error.code === "CHALLENGE_AMBIGUOUS") {
+          next(new ApiError(409, "INVALID_STATE_TRANSITION", "El Challenge ya no se puede recuperar."));
+          return;
+        }
+        next(new ApiError(400, "INVITATION_INVALID", "La invitación o el Challenge no está disponible."));
+        return;
+      }
+      next(new ApiError(503, "INTERNAL_ERROR", "El Challenge no está disponible."));
+    }
+  });
+
+  app.post("/api/invitations/google-bootstrap/challenge/verify", requireHttps, async (request, response, next) => {
+    try {
+      const body = z.object({ invitationId: z.string().uuid(), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        challengeId: z.string().uuid(), state: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        googleIdToken: z.string().min(1).max(20_000) }).strict().parse(request.body);
+      if (!dependencies.googleBootstrapChallengeDeliveryService || !dependencies.googleBootstrapComposition) {
+        throw new ApiError(503, "INTERNAL_ERROR", "La verificación del Challenge no está disponible.");
+      }
+      let service: GoogleBootstrapChallengeDeliveryService;
+      let composition: InternalGoogleBootstrapComposition;
+      try {
+        service = dependencies.googleBootstrapChallengeDeliveryService();
+        composition = dependencies.googleBootstrapComposition();
+      } catch {
+        throw new ApiError(503, "INTERNAL_ERROR", "La verificación del Challenge no está disponible.");
+      }
+      const result = await service.verifyAndConsume(body, composition);
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.status(200).json({ ok: true, data: { state: result.state }, requestId: requestIdFrom(response) });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        next(new ApiError(400, "VALIDATION_ERROR", "La solicitud no es válida."));
+        return;
+      }
+      if (error instanceof GoogleBootstrapChallengeDeliveryError) {
+        if (error.code === "INVITATION_INVALID" || error.code === "PROOF_EXPIRED" || error.code === "GOOGLE_IDENTITY_INVALID") {
+          next(new ApiError(400, "INVITATION_INVALID", "La invitación o la verificación no es válida."));
+          return;
+        }
+        if (["PROOF_NOT_FOUND", "PREPARATION_NOT_FOUND", "CHALLENGE_NOT_FOUND"].includes(error.code)) {
+          next(new ApiError(404, "NOT_FOUND", "El Challenge no está disponible."));
+          return;
+        }
+        if (["CHALLENGE_EXPIRED", "CHALLENGE_CONSUMED", "CHALLENGE_AMBIGUOUS", "CHALLENGE_STATE_INVALID"].includes(error.code)) {
+          next(new ApiError(409, "INVALID_STATE_TRANSITION", "El Challenge ya no se puede completar."));
+          return;
+        }
+        if (error.code === "VERIFICATION_UNAVAILABLE") {
+          next(new ApiError(503, "INTERNAL_ERROR", "La verificación Google no está disponible."));
+          return;
+        }
+        next(new ApiError(400, "INVITATION_INVALID", "La invitación o la verificación no es válida."));
+        return;
+      }
+      next(new ApiError(503, "INTERNAL_ERROR", "La verificación del Challenge no está disponible."));
+    }
+  });
+
   app.post("/api/invitations/establish-password", requireHttps, async (request, response, next) => {
     try {
       const data = await invitationAcceptanceService().establishPassword(request.body, sourceIdentifier(request), requestIdFrom(response));
@@ -469,7 +654,11 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
   });
 
-  app.all(["/api/invitations/validate", "/api/invitations/establish-password", "/api/invitations/:invitationId/confirm"], (_request, _response, next) => {
+  app.all(["/api/invitations/validate", "/api/invitations/google-bootstrap/proof/start",
+    "/api/invitations/google-bootstrap/proof/verify", "/api/invitations/google-bootstrap/challenge/recover",
+    "/api/invitations/google-bootstrap/challenge/verify",
+    "/api/invitations/establish-password",
+    "/api/invitations/:invitationId/confirm"], (_request, _response, next) => {
     next(new ApiError(405, "METHOD_NOT_ALLOWED", "El método HTTP no está permitido."));
   });
 

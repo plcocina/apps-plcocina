@@ -8,6 +8,7 @@ import { authCoordinationDocumentSchema } from "./identity-auth-coordination-con
 import { GoogleBootstrapChallengeCoordinator } from "./identity-google-bootstrap-challenge-coordinator.js";
 import { createInternalAuthOrchestrationService, type InternalAuthOrchestrationConfiguration,
   type InternalAuthOrchestrationDependencies } from "./identity-auth-orchestration-composition.js";
+import type { AuthOrchestrationTransactionValidator } from "./identity-auth-orchestration-service.js";
 
 const uuidSchema = z.string().uuid();
 const issueInputSchema = z.object({ principal: z.custom<AdminPrincipal>(), authorizationId: uuidSchema,
@@ -61,7 +62,8 @@ export class InternalGoogleBootstrapComposition {
     return this.coordinator.issue(value);
   }
 
-  async verifyAndConsume(input: GoogleBootstrapConsumeInput) {
+  async verifyAndConsume(input: GoogleBootstrapConsumeInput,
+    options: { validateTransaction?: AuthOrchestrationTransactionValidator } = {}) {
     const value = consumeInputSchema.parse(input);
     const challengeSnapshot = await this.db.collection("identityAuthChallenges").doc(value.challengeId).get();
     const challenge = authChallengeDocumentSchema.safeParse(challengeSnapshot.data());
@@ -112,7 +114,7 @@ export class InternalGoogleBootstrapComposition {
       googleIdToken: value.googleIdToken,
       nonce: value.nonce,
       state: value.state
-    });
+    }, options);
   }
 }
 

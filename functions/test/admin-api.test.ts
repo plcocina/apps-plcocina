@@ -1,10 +1,13 @@
 import type { DecodedIdToken } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 import { createHmac } from "node:crypto";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { createAdminApp } from "../src/app.js";
 import { GoogleBootstrapChallengeCoordinatorError } from "../src/identities/identity-google-bootstrap-challenge-coordinator.js";
+import { GoogleBootstrapPreparationError } from "../src/identities/identity-google-bootstrap-preparation-service.js";
+import { GoogleBootstrapChallengeDeliveryError } from "../src/identities/identity-google-bootstrap-challenge-delivery-service.js";
 import { GoogleIdentityLinkError } from "../src/identities/identity-linking-service.js";
 
 const ORIGIN = "https://apps.plcocina.com";
@@ -251,6 +254,217 @@ describe("Google bootstrap challenge HTTP endpoint", () => {
       .set("Origin", ORIGIN).set("Authorization", "Bearer valid-token");
     expect(applications.status).toBe(503);
     expect(applications.body.error.code).toBe("INTERNAL_ERROR");
+  });
+});
+
+describe("Google bootstrap preparation HTTP endpoint", () => {
+  const proofId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const authorizationId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const result = { proofId, uid: "private-uid", authorizationId, operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    coordinationOperationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", state: "not_started", replayed: false };
+  const preparation = vi.fn().mockResolvedValue(result);
+  const appWithPreparation = (verifier = vi.fn().mockResolvedValue(token()), prepare = preparation) => createAdminApp({
+    verifyIdToken: verifier, origins: new Set([ORIGIN]), now: () => NOW,
+    googleBootstrapPreparationService: () => ({ prepare } as never)
+  });
+  const send = (app: ReturnType<typeof createAdminApp>, body: Record<string, unknown> = { proofId }) => request(app)
+    .post("/api/admin/identities/google-bootstrap/preparations").set("Origin", ORIGIN)
+    .set("Authorization", "Bearer valid-token").send(body);
+
+  it("prepares a verified proof for an authenticated Super Admin", async () => {
+    const verifier = vi.fn().mockResolvedValue(token()); const prepare = vi.fn().mockResolvedValue(result);
+    const response = await send(appWithPreparation(verifier, prepare));
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.body.data).toEqual({ authorizationId, state: "not_started" });
+    expect(JSON.stringify(response.body)).not.toContain("private-uid");
+    expect(prepare).toHaveBeenCalledWith({ proofId }, expect.objectContaining({ uid: "admin-uid", superAdmin: true }));
+    expect(verifier).toHaveBeenCalledWith("valid-token", true);
+  });
+
+  it("rejects anonymous and non-Super-Admin callers before preparation", async () => {
+    const prepare = vi.fn(); const app = appWithPreparation(vi.fn().mockResolvedValue(token({ super_admin: false })), prepare);
+    const anonymous = await request(app).post("/api/admin/identities/google-bootstrap/preparations")
+      .set("Origin", ORIGIN).send({ proofId });
+    const ordinaryUser = await send(app);
+    expect(anonymous.status).toBe(401);
+    expect(ordinaryUser.status).toBe(403);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", "PROOF_NOT_FOUND", 404],
+    ["invalidated by invitation change", "INVITATION_INVALID", 400]
+  ] as const)("returns a generic error for proof %s", async (_description, code, status) => {
+    const prepare = vi.fn().mockRejectedValue(new GoogleBootstrapPreparationError(code));
+    const response = await send(appWithPreparation(vi.fn().mockResolvedValue(token()), prepare));
+    expect(response.status).toBe(status);
+    expect(JSON.stringify(response.body)).not.toMatch(/private-uid|proofId|PROOF_NOT_FOUND/);
+  });
+
+  it("rejects identity fields in the request body", async () => {
+    const prepare = vi.fn();
+    const response = await send(appWithPreparation(vi.fn().mockResolvedValue(token()), prepare),
+      { proofId, uid: "forged", subject: "forged", email: "forged@plcocina.com" });
+    expect(response.status).toBe(400);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("returns the same authorization reference for idempotent retries", async () => {
+    const prepare = vi.fn().mockResolvedValueOnce(result).mockResolvedValueOnce({ ...result, replayed: true });
+    const app = appWithPreparation(vi.fn().mockResolvedValue(token()), prepare);
+    const first = await send(app); const second = await send(app);
+    expect(first.body.data).toEqual({ authorizationId, state: "not_started" });
+    expect(second.body.data).toEqual(first.body.data);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare.mock.calls[0]).toEqual(prepare.mock.calls[1]);
+  });
+});
+
+describe("invitation Google bootstrap challenge recovery HTTP endpoint", () => {
+  const invitationId = "99999999-9999-4999-8999-999999999999";
+  const tokenValue = "t".repeat(43);
+  const challenge = { challengeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", nonce: "n".repeat(43), state: "s".repeat(43),
+    expiresAt: Timestamp.fromDate(new Date(NOW.getTime() + 300_000)) };
+  const recover = vi.fn().mockResolvedValue(challenge);
+  const appWithRecovery = (delivery = recover) => createAdminApp({ verifyIdToken: vi.fn(), origins: new Set([ORIGIN]), now: () => NOW,
+    googleBootstrapChallengeDeliveryService: () => ({ recover: delivery } as never) });
+  const send = (app: ReturnType<typeof createAdminApp>, body: Record<string, unknown> = { invitationId, token: tokenValue }) => request(app)
+    .post("/api/invitations/google-bootstrap/challenge/recover").set("Origin", ORIGIN).send(body);
+
+  it("returns only an existing invitation-bound challenge and is safe to retry", async () => {
+    const delivery = vi.fn().mockResolvedValue(challenge);
+    const app = appWithRecovery(delivery);
+    const first = await send(app); const second = await send(app);
+    expect(first.status).toBe(200);
+    expect(first.headers["cache-control"]).toContain("no-store");
+    expect(first.body.data).toEqual({ ...challenge, expiresAt: new Date(NOW.getTime() + 300_000).toISOString() });
+    expect(second.body.data).toEqual(first.body.data);
+    expect(delivery).toHaveBeenCalledTimes(2);
+    expect(delivery.mock.calls[0]).toEqual(delivery.mock.calls[1]);
+  });
+
+  it("rejects extra identity or issuance fields and returns generic errors", async () => {
+    const delivery = vi.fn().mockRejectedValue(new GoogleBootstrapChallengeDeliveryError("INVITATION_INVALID"));
+    const app = appWithRecovery(delivery);
+    const forged = await send(app, { invitationId, token: tokenValue, uid: "forged", subject: "forged",
+      authorizationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", challengeId: challenge.challengeId });
+    const invalid = await send(app);
+    expect(forged.status).toBe(400);
+    expect(invalid.status).toBe(400);
+    expect(invalid.headers["cache-control"]).toContain("no-store");
+    expect(JSON.stringify(invalid.body)).not.toContain("forged");
+    expect(delivery).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not issue when no previously emitted challenge can be recovered", async () => {
+    const delivery = vi.fn().mockRejectedValue(new GoogleBootstrapChallengeDeliveryError("CHALLENGE_NOT_FOUND"));
+    const response = await send(appWithRecovery(delivery));
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(response.body)).not.toContain("nonce");
+    expect(delivery).toHaveBeenCalledWith({ invitationId, token: tokenValue });
+  });
+});
+
+describe("invitation Google bootstrap challenge finalization HTTP endpoint", () => {
+  const body = { invitationId: "99999999-9999-4999-8999-999999999999", token: "t".repeat(43),
+    challengeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "s".repeat(43), googleIdToken: "signed-google-id-token" };
+  const finalize = vi.fn().mockResolvedValue({ state: "google_proof_verified", replayed: false });
+  const appWithFinalization = (operation = finalize) => createAdminApp({
+    verifyIdToken: vi.fn(), origins: new Set([ORIGIN]), now: () => NOW,
+    googleBootstrapChallengeDeliveryService: () => ({ verifyAndConsume: operation } as never),
+    googleBootstrapComposition: () => ({} as never)
+  });
+  const send = (app: ReturnType<typeof createAdminApp>, input: Record<string, unknown> = body) => request(app)
+    .post("/api/invitations/google-bootstrap/challenge/verify").set("Origin", ORIGIN).send(input);
+
+  it("finalizes and returns only the verification state", async () => {
+    const operation = vi.fn().mockResolvedValue({ state: "google_proof_verified", replayed: true, uid: "private-uid" });
+    const response = await send(appWithFinalization(operation));
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.body.data).toEqual({ state: "google_proof_verified" });
+    expect(JSON.stringify(response.body)).not.toContain("private-uid");
+    expect(operation).toHaveBeenCalledWith(body, expect.anything());
+  });
+
+  it("rejects client supplied nonce or identity fields before finalization", async () => {
+    const operation = vi.fn();
+    const response = await send(appWithFinalization(operation), { ...body, nonce: "forged", uid: "forged",
+      subject: "forged", email: "forged@plcocina.com" });
+    expect(response.status).toBe(400);
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("maps state and verification failures to generic no-store errors", async () => {
+    const failure = vi.fn().mockRejectedValue(new GoogleBootstrapChallengeDeliveryError("CHALLENGE_STATE_INVALID"));
+    const response = await send(appWithFinalization(failure));
+    expect(response.status).toBe(409);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(JSON.stringify(response.body)).not.toMatch(/signed-google|nonce|state|CHALLENGE_STATE_INVALID/);
+  });
+});
+
+describe("employee initial Google proof HTTP endpoints", () => {
+  const invitationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const challengeId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const inviteToken = "i".repeat(43);
+  const nonce = "safe-initial-google-nonce-value";
+  const idToken = "local-google-id-token-value";
+  const start = vi.fn().mockResolvedValue({ challengeId, nonce, expiresAt: Timestamp.fromDate(new Date(NOW.getTime() + 300_000)) });
+  const verify = vi.fn().mockResolvedValue({ proofId: challengeId, uid: "private-uid", state: "verified", verifiedAt: Timestamp.fromDate(NOW) });
+  const appWithProof = (service: { start: typeof start; verify: typeof verify } = { start, verify }) => createAdminApp({
+    verifyIdToken: vi.fn(), origins: new Set([ORIGIN]), now: () => NOW,
+    invitationGoogleProofService: () => service as never
+  });
+  const postStart = (app: ReturnType<typeof createAdminApp>, body: Record<string, unknown> = { invitationId, token: inviteToken }) => request(app)
+    .post("/api/invitations/google-bootstrap/proof/start").set("Origin", ORIGIN).send(body);
+  const verifyBody = { invitationId, token: inviteToken, challengeId, nonce, googleIdToken: idToken };
+  const postVerify = (app: ReturnType<typeof createAdminApp>, body: Record<string, unknown> = verifyBody) => request(app)
+    .post("/api/invitations/google-bootstrap/proof/verify").set("Origin", ORIGIN).send(body);
+
+  it("starts a proof using only the invitation capability and returns a no-store nonce", async () => {
+    const starter = vi.fn().mockResolvedValue({ challengeId, nonce, expiresAt: Timestamp.fromDate(new Date(NOW.getTime() + 300_000)) });
+    const response = await postStart(appWithProof({ start: starter, verify }));
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.body.data).toMatchObject({ challengeId, nonce });
+    expect(starter).toHaveBeenCalledWith({ invitationId, token: inviteToken });
+  });
+
+  it("verifies and returns no identity fields", async () => {
+    const verifier = vi.fn().mockResolvedValue({ proofId: challengeId, uid: "private-uid", state: "verified", verifiedAt: Timestamp.fromDate(NOW) });
+    const response = await postVerify(appWithProof({ start, verify: verifier }));
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.body.data).toEqual({ state: "verified", verifiedAt: NOW.toISOString() });
+    expect(JSON.stringify(response.body)).not.toContain("private-uid");
+    expect(verifier).toHaveBeenCalledWith(verifyBody);
+  });
+
+  it("rejects client supplied identity claims without invoking either service method", async () => {
+    const starter = vi.fn(); const verifier = vi.fn(); const app = appWithProof({ start: starter, verify: verifier });
+    const forgedStart = await postStart(app, { invitationId, token: inviteToken, uid: "forged", subject: "forged-sub" });
+    const forgedVerify = await postVerify(app, { ...verifyBody, uid: "forged", email: "forged@plcocina.com", subject: "forged-sub" });
+    expect(forgedStart.status).toBe(400);
+    expect(forgedVerify.status).toBe(400);
+    expect(starter).not.toHaveBeenCalled();
+    expect(verifier).not.toHaveBeenCalled();
+  });
+
+  it("maps invalid, consumed, and unavailable proof operations to generic no-store errors", async () => {
+    const invalid = vi.fn().mockRejectedValue(Object.assign(new Error("secret-bearing detail"), { code: "INVITATION_INVALID" }));
+    const consumed = vi.fn().mockRejectedValue(Object.assign(new Error("nonce/private identity"), { code: "CHALLENGE_CONSUMED" }));
+    const invalidResponse = await postStart(appWithProof({ start: invalid, verify }));
+    const consumedResponse = await postVerify(appWithProof({ start, verify: consumed }));
+    const unavailable = await postStart(createAdminApp({ verifyIdToken: vi.fn(), origins: new Set([ORIGIN]) }));
+    for (const response of [invalidResponse, consumedResponse, unavailable]) {
+      expect(response.headers["cache-control"]).toContain("no-store");
+      expect(JSON.stringify(response.body)).not.toMatch(/secret-bearing|nonce\/private identity|private-uid/);
+    }
+    expect(invalidResponse.status).toBe(400);
+    expect(consumedResponse.status).toBe(409);
+    expect(unavailable.status).toBe(503);
   });
 });
 

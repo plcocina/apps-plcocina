@@ -97,7 +97,12 @@ describe("GoogleIdentityTokenVerifier", () => {
 
   it("rejects an altered signature", async () => {
     const signed = token();
-    await expectCode(verifier().verify({ idToken: `${signed.slice(0, -2)}aa` }), "SIGNATURE_INVALID");
+    const [header, payload, encodedSignature] = signed.split(".");
+    const alteredSignature = Buffer.from(encodedSignature!, "base64url");
+    alteredSignature[0] = alteredSignature[0]! ^ 0x01;
+    await expectCode(verifier().verify({
+      idToken: `${header}.${payload}.${alteredSignature.toString("base64url")}`
+    }), "SIGNATURE_INVALID");
   });
 
   it("refreshes once and rejects an unknown key", async () => {

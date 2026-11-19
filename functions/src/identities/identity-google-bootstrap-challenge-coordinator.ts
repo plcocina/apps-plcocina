@@ -47,6 +47,20 @@ function digest(key: Buffer, purpose: string, authorizationId: string, idempoten
     .digest();
 }
 
+/** Recreates the one-time B4 secrets for the exact administrator issuance idempotency key. */
+export function deriveGoogleBootstrapChallengeSecrets(bootstrapChallengeKey: Buffer,
+  authorizationId: string, idempotencyKey: string): Readonly<{ nonce: string; state: string }> {
+  if (!Buffer.isBuffer(bootstrapChallengeKey) || bootstrapChallengeKey.length < 32) {
+    throw new Error("BOOTSTRAP_CHALLENGE_SECRET_KEY_TOO_SHORT");
+  }
+  const secretKey = createHmac("sha256", bootstrapChallengeKey)
+    .update("apps-pl-cocina/b4a/google-bootstrap-secret-derivation/v1").digest();
+  return Object.freeze({
+    nonce: digest(secretKey, "nonce", authorizationId, idempotencyKey).toString("base64url"),
+    state: digest(secretKey, "state", authorizationId, idempotencyKey).toString("base64url")
+  });
+}
+
 function uuidFromDigest(value: Buffer): string {
   const bytes = Buffer.from(value.subarray(0, 16));
   bytes[6] = (bytes[6]! & 0x0f) | 0x40;
@@ -99,12 +113,11 @@ export class GoogleBootstrapChallengeCoordinator {
       throw new GoogleBootstrapChallengeCoordinatorError("COORDINATION_CONTEXT_INVALID");
     }
 
-    const secretKey = createHmac("sha256", this.bootstrapChallengeSecretKey)
-      .update("apps-pl-cocina/b4a/google-bootstrap-secret-derivation/v1").digest();
+    const secrets = deriveGoogleBootstrapChallengeSecrets(this.bootstrapChallengeSecretKey, value.authorizationId, value.idempotencyKey);
     const challengeService = new AuthChallengePersistenceService(this.db, this.protectedSuperAdminUid, this.now, () => ({
       challengeId: authorization.data.authorizationId,
-      nonce: digest(secretKey, "nonce", value.authorizationId, value.idempotencyKey).toString("base64url"),
-      state: digest(secretKey, "state", value.authorizationId, value.idempotencyKey).toString("base64url")
+      nonce: secrets.nonce,
+      state: secrets.state
     }));
     const challenge = await challengeService.create({
       trustedOperatorUid: value.principal.uid,
@@ -123,6 +136,8 @@ export class GoogleBootstrapChallengeCoordinator {
 
     const coordinationService = new AuthCoordinationPersistenceService(this.db, this.protectedSuperAdminUid, this.now);
     const current = await coordinationService.get(coordination.operationId);
+    const secretKey = createHmac("sha256", this.bootstrapChallengeSecretKey)
+      .update("apps-pl-cocina/b4a/google-bootstrap-secret-derivation/v1").digest();
     const transitionIdempotencyKey = uuidFromDigest(digest(secretKey, "coordination-transition",
       value.authorizationId, value.idempotencyKey));
     if (current.state === "not_started") {

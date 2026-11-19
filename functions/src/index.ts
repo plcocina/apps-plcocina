@@ -4,6 +4,10 @@ import { getFirestore } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { createAdminApp } from "./app.js";
 import { createInternalGoogleBootstrapComposition } from "./identities/identity-google-bootstrap-composition.js";
+import { GoogleIdentityTokenVerifier } from "./identities/google-token-verifier.js";
+import { InvitationGoogleProofService } from "./identities/identity-invitation-google-proof-service.js";
+import { GoogleBootstrapPreparationService } from "./identities/identity-google-bootstrap-preparation-service.js";
+import { GoogleBootstrapChallengeDeliveryService } from "./identities/identity-google-bootstrap-challenge-delivery-service.js";
 import { GoogleIdentityLinkingService } from "./identities/identity-linking-service.js";
 import { identifierPepperParam, internalAuthOrchestrationConfiguration } from "./identities/identity-auth-orchestration-config.js";
 import {
@@ -50,6 +54,23 @@ const app = createAdminApp({
   googleBootstrapComposition: () => createInternalGoogleBootstrapComposition(
     firestore, internalAuthOrchestrationConfiguration()
   ),
+  invitationGoogleProofService: () => {
+    if (!invitationTokens) throw new Error("INVITATION_TOKEN_KEYRING_UNAVAILABLE");
+    const configuration = internalAuthOrchestrationConfiguration();
+    return new InvitationGoogleProofService(firestore, invitationTokens,
+      new GoogleIdentityTokenVerifier(configuration.googleTokenVerifier));
+  },
+  googleBootstrapPreparationService: () => {
+    const configuration = internalAuthOrchestrationConfiguration();
+    return new GoogleBootstrapPreparationService(firestore, configuration.identifierPepper,
+      configuration.protectedSuperAdminUid);
+  },
+  googleBootstrapChallengeDeliveryService: () => {
+    if (!invitationTokens) throw new Error("INVITATION_TOKEN_KEYRING_UNAVAILABLE");
+    const configuration = internalAuthOrchestrationConfiguration();
+    return new GoogleBootstrapChallengeDeliveryService(firestore, configuration.identifierPepper,
+      invitationTokens, configuration.protectedSuperAdminUid);
+  },
   bindEmployeeInvitationAuthorization: (input) => {
     const configuration = internalAuthOrchestrationConfiguration();
     return new GoogleIdentityLinkingService(firestore, configuration.identifierPepper,

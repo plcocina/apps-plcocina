@@ -16,7 +16,7 @@ import { googleWorkspaceUserV21DocumentSchema, identifierKeyHash, normalizeIdent
 const inputSchema = z.object({ proofId: z.string().uuid() }).strict();
 const principalSchema = z.object({ uid: z.string().min(1), email: z.string().nullable(), authTime: z.number().int().nonnegative(),
   issuedAt: z.number().int().nonnegative(), superAdmin: z.literal(true) }).strict();
-const planSchema = z.object({ proofId: z.string().uuid(), proofHash: z.string().regex(/^[a-f0-9]{64}$/), invitationId: z.string().uuid(),
+export const identityGoogleBootstrapPreparationPlanSchema = z.object({ proofId: z.string().uuid(), proofHash: z.string().regex(/^[a-f0-9]{64}$/), invitationId: z.string().uuid(),
   uid: z.string().min(1), subjectHash: z.string().regex(/^[a-f0-9]{64}$/), normalizedEmail: z.string().email(),
   credentialGeneration: z.number().int().positive(), verifiedProfileRevision: z.number().int().positive(),
   reservationOperationId: z.string().uuid(), authorizationId: z.string().uuid(), linkOperationId: z.string().uuid(),
@@ -48,6 +48,12 @@ function uuidFor(proofId: string, purpose: string): string {
 
 function canonicalHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+export function hashIdentityVerifiedGoogleProof(proof: z.infer<typeof identityVerifiedGoogleProofSchema>): string {
+  return canonicalHash({ proofId: proof.proofId, invitationId: proof.invitationId, uid: proof.uid,
+    subject: proof.subject, normalizedEmail: proof.normalizedEmail, credentialGeneration: proof.credentialGeneration,
+    verifiedAt: proof.verifiedAt.toMillis(), validUntil: proof.validUntil.toMillis() });
 }
 
 export class GoogleBootstrapPreparationService {
@@ -175,9 +181,7 @@ export class GoogleBootstrapPreparationService {
   private async ensurePlan(evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>,
     profileRevision: number, profileIsV2: boolean, principal: AdminPrincipal) {
     const ref = this.db.collection("identityGoogleBootstrapPreparations").doc(evidence.proofId);
-    const proofHash = canonicalHash({ proofId: evidence.proofId, invitationId: evidence.invitationId, uid: evidence.uid,
-      subject: evidence.subject, normalizedEmail: evidence.normalizedEmail, credentialGeneration: evidence.credentialGeneration,
-      verifiedAt: evidence.verifiedAt.toMillis(), validUntil: evidence.validUntil.toMillis() });
+    const proofHash = hashIdentityVerifiedGoogleProof(evidence);
     return this.db.runTransaction(async (transaction) => {
       const [currentProof, invitationSnapshot, profileSnapshot, planSnapshot] = await Promise.all([
         transaction.get(this.db.collection("identityVerifiedGoogleProofs").doc(evidence.proofId)),
@@ -186,10 +190,7 @@ export class GoogleBootstrapPreparationService {
       ]);
       const proof = identityVerifiedGoogleProofSchema.safeParse(currentProof.data());
       const invitation = invitationDocumentSchema.safeParse(invitationSnapshot.data());
-      if (!currentProof.exists || !proof.success || canonicalHash({ proofId: proof.data.proofId, invitationId: proof.data.invitationId,
-        uid: proof.data.uid, subject: proof.data.subject, normalizedEmail: proof.data.normalizedEmail,
-        credentialGeneration: proof.data.credentialGeneration, verifiedAt: proof.data.verifiedAt.toMillis(),
-        validUntil: proof.data.validUntil.toMillis() }) !== proofHash || !invitationSnapshot.exists || !invitation.success
+      if (!currentProof.exists || !proof.success || hashIdentityVerifiedGoogleProof(proof.data) !== proofHash || !invitationSnapshot.exists || !invitation.success
         || !this.validInvitation(invitation.data, evidence)) throw new GoogleBootstrapPreparationError("INVITATION_INVALID");
       const legacyProfile = userV2DocumentSchema.safeParse(profileSnapshot.data());
       const workspaceProfile = googleWorkspaceUserV21DocumentSchema.safeParse(profileSnapshot.data());
@@ -197,7 +198,7 @@ export class GoogleBootstrapPreparationService {
         : workspaceProfile.success ? workspaceProfile.data.normalizedEmail : null;
       if (!profileSnapshot.exists || currentEmail !== evidence.normalizedEmail) throw new GoogleBootstrapPreparationError("PROFILE_INVALID");
       if (planSnapshot.exists) {
-        const plan = planSchema.safeParse(planSnapshot.data());
+        const plan = identityGoogleBootstrapPreparationPlanSchema.safeParse(planSnapshot.data());
         if (!plan.success || plan.data.proofHash !== proofHash || plan.data.uid !== evidence.uid
           || plan.data.invitationId !== evidence.invitationId || plan.data.subjectHash !== identifierKeyHash("googleSubject", evidence.subject, this.identifierPepper)
           || plan.data.normalizedEmail !== evidence.normalizedEmail) throw new GoogleBootstrapPreparationError("PLAN_CONFLICT");
@@ -206,7 +207,7 @@ export class GoogleBootstrapPreparationService {
       const createdAt = this.now();
       const authExpiresAt = Timestamp.fromMillis(Math.min(createdAt.toMillis() + 15 * 60_000, evidence.validUntil.toMillis()));
       if (authExpiresAt.toMillis() <= createdAt.toMillis()) throw new GoogleBootstrapPreparationError("PROOF_EXPIRED");
-      const plan = planSchema.parse({ proofId: evidence.proofId, proofHash, invitationId: evidence.invitationId,
+      const plan = identityGoogleBootstrapPreparationPlanSchema.parse({ proofId: evidence.proofId, proofHash, invitationId: evidence.invitationId,
         uid: evidence.uid, subjectHash: identifierKeyHash("googleSubject", evidence.subject, this.identifierPepper),
         normalizedEmail: evidence.normalizedEmail, credentialGeneration: evidence.credentialGeneration,
         verifiedProfileRevision: profileRevision + (profileIsV2 ? 1 : 0),
@@ -220,7 +221,7 @@ export class GoogleBootstrapPreparationService {
   }
 
   private async ensureVerifiedProfile(evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>,
-    plan: z.infer<typeof planSchema>, principal: AdminPrincipal) {
+    plan: z.infer<typeof identityGoogleBootstrapPreparationPlanSchema>, principal: AdminPrincipal) {
     const invitationRef = this.db.collection("invitations").doc(evidence.invitationId);
     const profileRef = this.db.collection("users").doc(evidence.uid);
     return this.db.runTransaction(async (transaction) => {
@@ -288,7 +289,7 @@ export class GoogleBootstrapPreparationService {
     catch { throw new GoogleBootstrapPreparationError("AUTHORIZATION_CONFLICT"); }
   }
 
-  private createCoordinationDocument(plan: z.infer<typeof planSchema>, evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>,
+  private createCoordinationDocument(plan: z.infer<typeof identityGoogleBootstrapPreparationPlanSchema>, evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>,
     _principal: AdminPrincipal, profileRevision: number, linkedAt: Timestamp) {
     if (this.now().toMillis() >= plan.authorizationExpiresAt.toMillis()) throw new GoogleBootstrapPreparationError("PREPARATION_EXPIRED");
     return authCoordinationDocumentSchema.parse({ operationId: plan.coordinationOperationId, operation: "google.firebase_provider_link",
@@ -305,13 +306,13 @@ export class GoogleBootstrapPreparationService {
   }
 
   private async markPrepared(evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>,
-    plan: z.infer<typeof planSchema>, principal: AdminPrincipal) {
+    plan: z.infer<typeof identityGoogleBootstrapPreparationPlanSchema>, principal: AdminPrincipal) {
     const invitationRef = this.db.collection("invitations").doc(evidence.invitationId);
     const planRef = this.db.collection("identityGoogleBootstrapPreparations").doc(evidence.proofId);
     await this.db.runTransaction(async (transaction) => {
       const [invitationSnapshot, planSnapshot] = await Promise.all([transaction.get(invitationRef), transaction.get(planRef)]);
       const invitation = invitationDocumentSchema.safeParse(invitationSnapshot.data());
-      const currentPlan = planSchema.safeParse(planSnapshot.data());
+      const currentPlan = identityGoogleBootstrapPreparationPlanSchema.safeParse(planSnapshot.data());
       if (!invitationSnapshot.exists || !invitation.success || !this.validInvitation(invitation.data, evidence)
         || !planSnapshot.exists || !currentPlan.success || currentPlan.data.proofHash !== plan.proofHash) {
         throw new GoogleBootstrapPreparationError("INVITATION_INVALID");
@@ -336,14 +337,14 @@ export class GoogleBootstrapPreparationService {
     }
   }
 
-  private assertPlan(plan: z.infer<typeof planSchema>, evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>) {
+  private assertPlan(plan: z.infer<typeof identityGoogleBootstrapPreparationPlanSchema>, evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>) {
     if (plan.uid !== evidence.uid || plan.invitationId !== evidence.invitationId || plan.credentialGeneration !== evidence.credentialGeneration
       || plan.normalizedEmail !== evidence.normalizedEmail || plan.subjectHash !== identifierKeyHash("googleSubject", evidence.subject, this.identifierPepper)) {
       throw new GoogleBootstrapPreparationError("PLAN_CONFLICT");
     }
   }
 
-  private assertNotExpired(plan: z.infer<typeof planSchema>) {
+  private assertNotExpired(plan: z.infer<typeof identityGoogleBootstrapPreparationPlanSchema>) {
     if (plan.authorizationExpiresAt.toMillis() <= this.now().toMillis()) throw new GoogleBootstrapPreparationError("PREPARATION_EXPIRED");
   }
 

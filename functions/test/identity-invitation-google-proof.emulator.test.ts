@@ -78,6 +78,13 @@ describe("invitation-bound initial Google proof", () => {
     await expect(f.service.verify({ invitationId: f.invitationId, token: f.token, challengeId: start.challengeId, nonce: start.nonce,
       googleIdToken: jwt("google-subject", f.email, start.nonce) })).rejects.toMatchObject({ code: "INVITATION_INVALID" });
   });
+  it("rejects an expired invitation before issuing a proof challenge", async () => {
+    const f = await fixture();
+    await db.collection("invitations").doc(f.invitationId).update({ expiresAt: clock(), "token.expiresAt": clock() });
+    await expect(f.service.start({ invitationId: f.invitationId, token: f.token })).rejects.toMatchObject({ code: "INVITATION_INVALID" });
+    expect((await db.collection("identityInvitationGoogleProofChallenges").get()).docs
+      .some((document) => document.data().invitationId === f.invitationId)).toBe(false);
+  });
   it("invalidates the earlier proof attempt after credential resend", async () => {
     const f = await fixture(); const start = await f.service.start({ invitationId: f.invitationId, token: f.token });
     const next = tokens.issue(f.invitationId, 2); const expiresAt = Timestamp.fromMillis(clock().toMillis() + 3_600_000);
