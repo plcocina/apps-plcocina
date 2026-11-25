@@ -3,8 +3,13 @@ import { deleteApp, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { Timestamp, getFirestore, type Firestore } from "firebase-admin/firestore";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import request from "supertest";
+import type { DecodedIdToken } from "firebase-admin/auth";
+import { createAdminApp } from "../src/app.js";
 import type { AdminPrincipal } from "../src/auth/require-super-admin.js";
 import { InvitationTokenKeyring } from "../src/invitations/invitation-token.js";
+import { InvitationService } from "../src/invitations/invitation-service.js";
+import { SimulatedInvitationEmailProvider } from "../src/invitations/invitation-email-provider.js";
 import { GoogleAuthLibraryJwtCryptographicVerifier, GoogleIdentityTokenVerifier, type GoogleCertificateSource,
   type GoogleTokenVerifierConfig } from "../src/identities/google-token-verifier.js";
 import { createInternalGoogleBootstrapComposition } from "../src/identities/identity-google-bootstrap-composition.js";
@@ -54,11 +59,13 @@ async function fixture() {
   const email = `empleado-${randomUUID()}@plcocina.com`; const issuedAt = clock();
   const expiresAt = Timestamp.fromMillis(issuedAt.toMillis() + 3_600_000); const token = invitationTokens.issue(invitationId, 1);
   await getAuth(app).createUser({ uid, email, disabled: true });
-  await db.collection("users").doc(uid).set({ displayName: "Empleado", status: "invited", authDisabled: true,
-    invitationStatus: "pending", authMethod: "email", phoneE164: null, normalizedPhone: null, email, normalizedEmail: email,
-    phoneVerifiedAt: null, emailVerifiedAt: null, activationStatus: "pending", credentialRevision: 1, authorizationRevision: 1,
+  await db.collection("users").doc(uid).set({ uid, displayName: "Empleado", status: "invited", authDisabled: true,
+    invitationStatus: "pending", authMethod: "googleWorkspace", phoneE164: null, normalizedPhone: null, email, normalizedEmail: email,
+    phoneVerifiedAt: null, emailVerifiedAt: null, googleWorkspace: { authorizedDomain: "plcocina.com", subject: null,
+      linkingStatus: "declared", verificationStatus: "unverified", verifiedAt: null, linkedAt: null,
+      verificationRevision: 1, operationId: null }, activationStatus: "pending", credentialRevision: 1, authorizationRevision: 1,
     sessionValidAfter: issuedAt, createdAt: issuedAt, createdBy: adminUid, updatedAt: issuedAt, updatedBy: adminUid,
-    revision: 1, pendingOperationId: null, version: 2 });
+    revision: 1, pendingOperationId: null, identityContractVersion: "2.1", version: 2 });
   await db.collection("invitations").doc(invitationId).set({ invitationId, email, normalizedEmail: email, displayName: "Empleado", verificationMethod: "googleWorkspace", uid,
     status: "active", token: { hash: token.hash, generation: 1, salt: token.salt, keyVersion: token.keyVersion, issuedAt, expiresAt },
     delivery: { provider: "simulated", status: "accepted", idempotencyKey: `invitation/${invitationId}/generation/1`, providerMessageId: null,
@@ -75,7 +82,7 @@ async function fixture() {
     nonce: proofChallenge.nonce, googleIdToken: googleToken(proofSubject, email, proofChallenge.nonce) });
   return { invitationId, invitationToken: token, uid, email, proofId: proof.proofId, proofSubject, proofNonce: proofChallenge.nonce };
 }
-function service(options: { failLinkOnce?: { value: boolean } } = {}) {
+function service(options: { failLinkOnce?: { value: boolean }; failCoordinationOnce?: { value: boolean } } = {}) {
   const reservation = new IdentityReservationService(db, pepper, clock);
   const linking = new GoogleIdentityLinkingService(db, pepper, adminUid, clock);
   const coordination = new AuthCoordinationPersistenceService(db, adminUid, clock);
@@ -87,7 +94,10 @@ function service(options: { failLinkOnce?: { value: boolean } } = {}) {
       if (options.failLinkOnce?.value) { options.failLinkOnce.value = false; throw new Error("SIMULATED_INTERRUPTION"); }
       return realLink(input);
     },
-    createCoordination: coordination.create.bind(coordination)
+    createCoordination: async (input) => {
+      if (options.failCoordinationOnce?.value) { options.failCoordinationOnce.value = false; throw new Error("SIMULATED_COORDINATION_INTERRUPTION"); }
+      return coordination.create(input);
+    }
   });
 }
 function bootstrapComposition(certificates: GoogleCertificateSource = new LocalCertificates()) {
@@ -105,7 +115,152 @@ function deliveryService(nowProvider = clock) {
 }
 const prepareInput = (proofId: string) => ({ proofId });
 
+function adminApp() {
+  const auth = getAuth(app);
+  const directory = {
+    listUsers: (maxResults: number, pageToken?: string) => auth.listUsers(maxResults, pageToken),
+    getUser: (uid: string) => auth.getUser(uid), getUserByEmail: (email: string) => auth.getUserByEmail(email),
+    getUsers: (identifiers: Parameters<typeof auth.getUsers>[0]) => auth.getUsers(identifiers),
+    updateUser: (uid: string, properties: Parameters<typeof auth.updateUser>[1]) => auth.updateUser(uid, properties),
+    revokeRefreshTokens: (uid: string) => auth.revokeRefreshTokens(uid),
+    createUser: (properties: Parameters<typeof auth.createUser>[0]) => auth.createUser(properties)
+  };
+  const provider = new SimulatedInvitationEmailProvider(() => now);
+  const composition = () => createInternalGoogleBootstrapComposition(db, { googleTokenVerifier: verifierConfig,
+    identifierPepper: pepper, protectedSuperAdminUid: adminUid }, { certificates: new LocalCertificates(),
+    cryptographicVerifier: new GoogleAuthLibraryJwtCryptographicVerifier(), now: () => now });
+  return { provider, tokens: invitationTokens, directory, app: createAdminApp({
+    verifyIdToken: async () => ({ uid: adminUid, sub: adminUid, email: principal.email, auth_time: principal.authTime,
+      iat: principal.issuedAt, super_admin: true } as DecodedIdToken),
+    origins: new Set(["https://apps.plcocina.com"]), firestore: db, userDirectory: directory,
+    protectedSuperAdminUid: adminUid, googleWorkspaceDomain: "plcocina.com", invitationTokens,
+    invitationEmailProvider: provider,
+    invitationGoogleProofService: () => new InvitationGoogleProofService(db, invitationTokens,
+      new GoogleIdentityTokenVerifier(verifierConfig, new LocalCertificates(), new GoogleAuthLibraryJwtCryptographicVerifier(), () => now), clock),
+    googleBootstrapPreparationService: () => service(), googleBootstrapComposition: composition,
+    googleBootstrapChallengeDeliveryService: () => deliveryService()
+  }) };
+}
+
+async function issueThroughAdminRoute() {
+  const h = adminApp(); const email = `route-${randomUUID()}@plcocina.com`; const invitationId = randomUUID();
+  const created = await request(h.app).post("/api/admin/invitations").set("Authorization", "Bearer admin")
+    .set("Idempotency-Key", invitationId).send({ displayName: "Invitado Workspace", email, verificationMethod: "googleWorkspace" });
+  expect(created.status).toBe(201);
+  const invitationToken = h.provider.deliveries.at(-1)!.message.token;
+  const uid = created.body.data.uid;
+  expect((await db.collection("users").doc(uid).get()).data()).toMatchObject({ uid, version: 2,
+    identityContractVersion: "2.1", authMethod: "googleWorkspace", authDisabled: true, status: "invited" });
+  expect((await getAuth(app).getUser(uid)).disabled).toBe(true);
+  return { ...h, invitationId, invitationToken, uid, email };
+}
+
 describe("E5 preparation from B5-B4 verified evidence", () => {
+  it("reconfirms an existing v2.1 Google link with the same UID, email, domain, and subject", async () => {
+    const f = await fixture();
+    const proof = (await db.collection("identityVerifiedGoogleProofs").doc(f.proofId).get()).data()!;
+    const linkedAt = Timestamp.fromMillis(proof.verifiedAt.toMillis() - 1_000);
+    const profileRef = db.collection("users").doc(f.uid);
+    await profileRef.update({ revision: 2, credentialRevision: 2, emailVerifiedAt: proof.verifiedAt,
+      activationStatus: "linked_pending_activation",
+      "googleWorkspace.subject": proof.subject, "googleWorkspace.linkingStatus": "linked",
+      "googleWorkspace.verificationStatus": "verified", "googleWorkspace.verifiedAt": proof.verifiedAt,
+      "googleWorkspace.linkedAt": linkedAt, "googleWorkspace.verificationRevision": 2 });
+    await new IdentityReservationService(db, pepper, clock).reserve({ operationId: randomUUID(), uid: f.uid,
+      kind: "googleSubject", value: String(proof.subject) });
+
+    const h = adminApp();
+    const preparedResponse = await request(h.app).post("/api/admin/identities/google-bootstrap/preparations")
+      .set("Authorization", "Bearer admin").send({ proofId: f.proofId });
+    expect(preparedResponse.status).toBe(200);
+    expect(preparedResponse.body.data).toMatchObject({ state: "not_started" });
+    const plan = (await db.collection("identityGoogleBootstrapPreparations").doc(f.proofId).get()).data()!;
+    const issuedResponse = await request(h.app).post("/api/admin/identities/google-bootstrap/challenges")
+      .set("Authorization", "Bearer admin").send({ authorizationId: preparedResponse.body.data.authorizationId,
+        idempotencyKey: randomUUID() });
+    expect(issuedResponse.status).toBe(200);
+    const prepared = { ...preparedResponse.body.data, authorizationId: plan.authorizationId };
+    const issued = issuedResponse.body.data;
+    expect(prepared).toMatchObject({ state: "not_started" });
+    expect((await profileRef.get()).data()).toMatchObject({ revision: 3, credentialRevision: 2,
+      authDisabled: true, status: "invited", activationStatus: "linked_pending_activation",
+      googleWorkspace: { subject: proof.subject, linkingStatus: "linked", verificationStatus: "verified", linkedAt } });
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+    const authz = (await db.collection("identityLinkAuthorizations").doc(prepared.authorizationId).get()).data();
+    expect(authz).toMatchObject({ targetUid: f.uid, googleSubjectHash: identifierKeyHash("googleSubject", String(proof.subject), pepper), state: "consumed" });
+    const challenge = (await db.collection("identityAuthChallenges").doc(issued.challengeId).get()).data();
+    expect(challenge).toMatchObject({ authorizationId: prepared.authorizationId, expectedFirebaseUid: f.uid, state: "issued" });
+  });
+
+  it("rejects a previously linked profile when its Google subject conflicts with the current proof", async () => {
+    const f = await fixture();
+    const proof = (await db.collection("identityVerifiedGoogleProofs").doc(f.proofId).get()).data()!;
+    const profileRef = db.collection("users").doc(f.uid);
+    await profileRef.update({ emailVerifiedAt: proof.verifiedAt, activationStatus: "linked_pending_activation",
+      "googleWorkspace.subject": `${proof.subject}-different`, "googleWorkspace.linkingStatus": "linked",
+      "googleWorkspace.verificationStatus": "verified", "googleWorkspace.verifiedAt": proof.verifiedAt,
+      "googleWorkspace.linkedAt": proof.verifiedAt });
+    await expect(service().prepare(prepareInput(f.proofId), principal)).rejects.toMatchObject({ code: "PROFILE_CONFLICT" });
+    expect((await profileRef.get()).data()?.googleWorkspace.subject).toBe(`${proof.subject}-different`);
+    expect((await db.collection("identityGoogleBootstrapPreparations").doc(f.proofId).get()).exists).toBe(false);
+    expect((await db.collection("identityLinkAuthorizations").where("targetUid", "==", f.uid).get()).empty).toBe(true);
+  });
+
+  it("runs both RSA proofs end to end from an administrative invitation without seeding the profile", async () => {
+    const f = await issueThroughAdminRoute();
+    const profileRef = db.collection("users").doc(f.uid);
+    const initialProfile = (await profileRef.get()).data()!;
+    expect(initialProfile).toMatchObject({ uid: f.uid, version: 2, identityContractVersion: "2.1",
+      authMethod: "googleWorkspace", googleWorkspace: { subject: null, linkingStatus: "declared" } });
+
+    const firstChallenge = await request(f.app).post("/api/invitations/google-bootstrap/proof/start")
+      .set("x-forwarded-proto", "https").send({ invitationId: f.invitationId, token: f.invitationToken });
+    expect(firstChallenge.status).toBe(200);
+    const verified = await request(f.app).post("/api/invitations/google-bootstrap/proof/verify")
+      .set("x-forwarded-proto", "https").send({ invitationId: f.invitationId, token: f.invitationToken,
+        challengeId: firstChallenge.body.data.challengeId, nonce: firstChallenge.body.data.nonce,
+        googleIdToken: googleToken(`google-sub-${randomUUID()}`, f.email, firstChallenge.body.data.nonce) });
+    expect(verified.status).toBe(200);
+    const proofId = firstChallenge.body.data.challengeId;
+    const storedProof = (await db.collection("identityVerifiedGoogleProofs").doc(proofId).get()).data()!;
+    expect(storedProof).toMatchObject({ uid: f.uid, invitationId: f.invitationId, state: "verified", nonceVerified: true });
+
+    const prepared = await request(f.app).post("/api/admin/identities/google-bootstrap/preparations")
+      .set("Authorization", "Bearer admin").send({ proofId });
+    expect(prepared.status).toBe(200);
+    const issued = await request(f.app).post("/api/admin/identities/google-bootstrap/challenges")
+      .set("Authorization", "Bearer admin").send({ authorizationId: prepared.body.data.authorizationId, idempotencyKey: randomUUID() });
+    expect(issued.status).toBe(200);
+    const finalToken = googleToken(String(storedProof.subject), f.email, issued.body.data.nonce);
+    const consumed = await request(f.app).post("/api/invitations/google-bootstrap/challenge/verify")
+      .set("x-forwarded-proto", "https").send({ invitationId: f.invitationId, token: f.invitationToken,
+        challengeId: issued.body.data.challengeId, state: issued.body.data.state, googleIdToken: finalToken });
+    expect(consumed.status).toBe(200);
+    expect(consumed.body.data.state).toBe("google_proof_verified");
+    expect((await profileRef.get()).data()).toMatchObject({ uid: f.uid, activationStatus: "linked_pending_activation",
+      authDisabled: true, status: "invited", googleWorkspace: { subject: storedProof.subject, linkingStatus: "linked" } });
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+    const plan = (await db.collection("identityGoogleBootstrapPreparations").doc(proofId).get()).data()!;
+    expect((await db.collection("identityAuthCoordinations").doc(plan.coordinationOperationId).get()).data())
+      .toMatchObject({ state: "google_proof_verified", expectedFirebaseUid: f.uid });
+  });
+
+  it("expires a route-created Google v2.1 profile using an isolated controlled clock", async () => {
+    const f = await issueThroughAdminRoute();
+    const future = Timestamp.fromDate(new Date(now.getTime() + 2 * 60 * 60 * 1000));
+    const alreadyExpired = Timestamp.fromMillis(future.toMillis() - 1);
+    const invitationRef = db.collection("invitations").doc(f.invitationId);
+    await invitationRef.update({ expiresAt: alreadyExpired, "token.expiresAt": alreadyExpired });
+    const controlledClock = () => future;
+    const service = new InvitationService(f.directory, db, invitationTokens, f.provider, adminUid, controlledClock, "plcocina.com");
+    const result = await service.reconcileExpired(500);
+    expect(result).toMatchObject({ inspected: 1, expired: 1, reconciliationRequired: 0 });
+    expect((await invitationRef.get()).data()).toMatchObject({ status: "expired", token: null });
+    expect((await db.collection("users").doc(f.uid).get()).data()).toMatchObject({ uid: f.uid, version: 2,
+      status: "disabled", authDisabled: true, invitationStatus: "expired", authMethod: "googleWorkspace" });
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
+  });
+
   it("prepares reservation, invitation-bound E4B2 and E5B2, then issues through existing B4", async () => {
     const f = await fixture();
     const proof = (await db.collection("identityVerifiedGoogleProofs").doc(f.proofId).get()).data()!;
@@ -211,6 +366,25 @@ describe("E5 preparation from B5-B4 verified evidence", () => {
     const recovered = await prep.prepare(prepareInput(f.proofId), principal);
     expect(recovered).toMatchObject({ uid: f.uid, state: "not_started" });
     expect((await db.collection("identityAuthCoordinations").where("expectedFirebaseUid", "==", f.uid).get()).size).toBe(1);
+  });
+
+  it("recovers a preparing plan after link completion without consuming authorization again", async () => {
+    const f = await fixture(); const failure = { value: true }; const prep = service({ failCoordinationOnce: failure });
+    await expect(prep.prepare(prepareInput(f.proofId), principal)).rejects.toMatchObject({ code: "COORDINATION_CONFLICT" });
+    const plan = (await db.collection("identityGoogleBootstrapPreparations").doc(f.proofId).get()).data()!;
+    const authorizationRef = db.collection("identityLinkAuthorizations").doc(String(plan.authorizationId));
+    const authorizationBefore = (await authorizationRef.get()).data();
+    expect(authorizationBefore).toMatchObject({ state: "consumed", targetUid: f.uid });
+    expect((await db.collection("identityGoogleBootstrapPreparations").doc(f.proofId).get()).data()).toMatchObject({ state: "preparing" });
+    expect((await db.collection("identityLinkOperations").doc(String(plan.linkIdempotencyKey)).get()).data()).toMatchObject({ status: "completed" });
+    expect((await db.collection("identityAuthCoordinations").doc(String(plan.coordinationOperationId)).get()).exists).toBe(false);
+
+    const recovered = await prep.prepare(prepareInput(f.proofId), principal);
+    expect(recovered).toMatchObject({ uid: f.uid, authorizationId: plan.authorizationId, state: "not_started", replayed: true });
+    expect((await authorizationRef.get()).data()).toEqual(authorizationBefore);
+    expect((await db.collection("identityLinkOperations").where("targetUid", "==", f.uid).get()).size).toBe(1);
+    expect((await db.collection("identityAuthCoordinations").where("expectedFirebaseUid", "==", f.uid).get()).size).toBe(1);
+    expect((await getAuth(app).getUser(f.uid)).disabled).toBe(true);
   });
 });
 

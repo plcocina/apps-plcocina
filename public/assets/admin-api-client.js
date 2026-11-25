@@ -1,6 +1,11 @@
-export const ADMIN_ME_URL =
-  "https://adminapi-nnra4xim6q-uc.a.run.app/api/admin/me";
-export const ADMIN_API_BASE = "https://adminapi-nnra4xim6q-uc.a.run.app";
+import { isLocalPilot } from "./firebase-client-config.js";
+
+export function adminApiBaseForLocation(locationRef = globalThis.location) {
+  return isLocalPilot(locationRef) ? "" : "https://adminapi-nnra4xim6q-uc.a.run.app";
+}
+
+export const ADMIN_API_BASE = adminApiBaseForLocation();
+export const ADMIN_ME_URL = `${ADMIN_API_BASE}/api/admin/me`;
 
 export class AdminApiError extends Error {
   constructor(code, message, status = null) {

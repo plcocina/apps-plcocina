@@ -4,6 +4,9 @@
     "ignore": ["firebase.json", "firebase.emulators.json", "**/.*", "**/node_modules/**"],
     "cleanUrls": true,
     "trailingSlash": false,
+    "rewrites": [
+      { "source": "/api/**", "function": { "functionId": "adminApi", "region": "us-central1" } }
+    ],
     "headers": [
       {
         "source": "**",
@@ -17,7 +20,13 @@
       },
       {
         "source": "/accept-invitation{,/**}",
-        "headers": [{ "key": "Cache-Control", "value": "no-store, max-age=0" }]
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' https://www.gstatic.com https://accounts.google.com/gsi/client; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://127.0.0.1:5001 http://localhost:5001 http://127.0.0.1:9099 http://localhost:9099 https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://*.googleapis.com https://*.firebaseio.com https://accounts.google.com/gsi/; frame-src https://plcocina-apps.firebaseapp.com https://accounts.google.com/gsi/"
+          },
+          { "key": "Cache-Control", "value": "no-store, max-age=0" }
+        ]
       }
     ]
   },

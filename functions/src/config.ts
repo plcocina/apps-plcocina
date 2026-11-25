@@ -26,5 +26,8 @@ export function allowedOrigins(): ReadonlySet<string> {
   if (process.env.FUNCTIONS_EMULATOR === "true" || process.env.NODE_ENV === "test") {
     origins.push(...EMULATOR_ORIGINS);
   }
+  if (process.env.FUNCTIONS_EMULATOR === "true") {
+    origins.push("https://localhost:8443");
+  }
   return new Set(origins);
 }

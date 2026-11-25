@@ -10,9 +10,9 @@ import {
   type InvitationDocument
 } from "../models/admin-collections.js";
 import type { DirectoryUser, UserDirectory } from "../users/user-query-service.js";
-import { InvitationEmailProviderError, type InvitationEmailProvider } from "./invitation-email-provider.js";
+import { InvitationEmailProviderError, SimulatedInvitationEmailProvider, type InvitationEmailProvider } from "./invitation-email-provider.js";
 import { effectiveInvitationStatus } from "./invitation-transitions.js";
-import { authMethodV21Schema } from "../identities/identity-models.js";
+import { authMethodV21Schema, googleWorkspaceUserV21DocumentSchema, userV2DocumentSchema } from "../identities/identity-models.js";
 import {
   INVITATION_DEFAULT_HOURS,
   INVITATION_MAX_HOURS,
@@ -27,6 +27,7 @@ const createInvitationSchema = z.object({
 }).strict();
 const keySchema = z.string().uuid();
 const invitationIdSchema = z.string().uuid();
+const invitationProfileDocumentSchema = z.union([userDocumentSchema, userV2DocumentSchema, googleWorkspaceUserV21DocumentSchema]);
 const resendInvitationSchema = z.object({
   expectedRevision: z.number().int().positive(),
   expiresInHours: z.number().int().min(1).max(INVITATION_MAX_HOURS).default(INVITATION_DEFAULT_HOURS)
@@ -97,6 +98,31 @@ export class InvitationService {
     private readonly now: () => Timestamp = () => Timestamp.now(),
     private readonly googleWorkspaceDomain: string | null = null
   ) {}
+
+  async simulatedInvitationLink(invitationId: string): Promise<{ invitationId: string; token: string }> {
+    if (!(this.emailProvider instanceof SimulatedInvitationEmailProvider) || !this.tokens) {
+      throw new ApiError(404, "NOT_FOUND", "La invitación no está disponible.");
+    }
+    const parsedId = invitationIdSchema.safeParse(invitationId);
+    if (!parsedId.success) throw new ApiError(404, "NOT_FOUND", "La invitación no está disponible.");
+    const snapshot = await this.db.collection("invitations").doc(parsedId.data).get();
+    if (!snapshot.exists) throw new ApiError(404, "NOT_FOUND", "La invitación no está disponible.");
+    const invitation = invitationDocumentSchema.parse(snapshot.data());
+    const now = this.now().toMillis();
+    if (invitation.delivery.provider !== "simulated"
+      || invitation.status !== "active"
+      || effectiveInvitationStatus(invitation, now) !== "active"
+      || !invitation.token
+      || invitation.token.expiresAt.toMillis() <= now) {
+      throw new ApiError(404, "NOT_FOUND", "La invitación no está disponible.");
+    }
+    const token = this.tokens.reconstruct(invitation.invitationId, invitation.token.generation,
+      invitation.token.salt, invitation.token.keyVersion);
+    if (!this.tokens.verify(token, invitation.token.hash)) {
+      throw new ApiError(404, "NOT_FOUND", "La invitación no está disponible.");
+    }
+    return { invitationId: invitation.invitationId, token };
+  }
 
   async create(input: {
     body: unknown;
@@ -417,7 +443,7 @@ export class InvitationService {
         transaction.update(operationRef, { status: "pending", requestId: input.requestId, leaseOwner: input.requestId, leaseExpiresAt, attempts: operation.attempts + 1, updatedAt: timestamp, failureCode: null });
         return null;
       }
-      if (!profileSnapshot.exists || !userDocumentSchema.safeParse(profileSnapshot.data()).success) {
+      if (!profileSnapshot.exists || !invitationProfileDocumentSchema.safeParse(profileSnapshot.data()).success) {
         throw new ApiError(409, "PROFILE_REQUIRED", "La cuenta invitada requiere un perfil válido.");
       }
       if (["accepted", "revoked"].includes(invitation.status)) throw new ApiError(409, "INVALID_STATE_TRANSITION", "La invitación no admite revocación en su estado actual.");
@@ -529,7 +555,7 @@ export class InvitationService {
         const operation = adminOperationDocumentSchema.parse(operationSnapshot.data());
         const result = publicResult(invitation, timestamp);
         if (profileSnapshot.exists) {
-          const profile = userDocumentSchema.safeParse(profileSnapshot.data());
+          const profile = invitationProfileDocumentSchema.safeParse(profileSnapshot.data());
           if (profile.success) transaction.update(profileRef, {
             status: "disabled", authDisabled: true, invitationStatus: "expired", updatedAt: timestamp,
             updatedBy: "system", revision: profile.data.revision + 1, pendingOperationId: null
@@ -659,33 +685,36 @@ export class InvitationService {
       ]);
       const invitation = invitationDocumentSchema.parse(invitationSnapshot.data());
       if (profileSnapshot.exists) {
-        const profile = userDocumentSchema.safeParse(profileSnapshot.data());
+        const profile = invitationProfileDocumentSchema.safeParse(profileSnapshot.data());
         if (!profile.success || profile.data.normalizedEmail !== input.request.email || profile.data.status !== "invited") {
           throw new ApiError(409, "PROFILE_INCONSISTENT", "El perfil existente no pertenece a esta invitación.");
         }
       } else {
-        transaction.create(input.profileRef, userDocumentSchema.parse({
-          email: input.request.email,
-          normalizedEmail: input.request.email,
-          displayName: input.request.displayName,
-          status: "invited",
-          authDisabled: true,
-          invitationStatus: "pending",
-          createdAt: timestamp,
-          createdBy: input.principal.uid,
-          updatedAt: timestamp,
-          updatedBy: input.principal.uid,
-          revision: 1,
-          pendingOperationId: null,
-          version: 1
-        }));
+        const profile = input.request.verificationMethod === "googleWorkspace"
+          ? googleWorkspaceUserV21DocumentSchema.parse({
+            uid: input.uid, email: input.request.email, normalizedEmail: input.request.email,
+            displayName: input.request.displayName, status: "invited", authDisabled: true, invitationStatus: "pending",
+            authMethod: "googleWorkspace", phoneE164: null, normalizedPhone: null, phoneVerifiedAt: null, emailVerifiedAt: null,
+            googleWorkspace: { authorizedDomain: this.googleWorkspaceDomain!, subject: null, linkingStatus: "declared",
+              verificationStatus: "unverified", verifiedAt: null, linkedAt: null, verificationRevision: 1, operationId: null },
+            activationStatus: "pending", credentialRevision: 1, authorizationRevision: 1, sessionValidAfter: timestamp,
+            createdAt: timestamp, createdBy: input.principal.uid, updatedAt: timestamp, updatedBy: input.principal.uid,
+            revision: 1, pendingOperationId: null, identityContractVersion: "2.1", version: 2
+          })
+          : userDocumentSchema.parse({
+            email: input.request.email, normalizedEmail: input.request.email, displayName: input.request.displayName,
+            status: "invited", authDisabled: true, invitationStatus: "pending", createdAt: timestamp,
+            createdBy: input.principal.uid, updatedAt: timestamp, updatedBy: input.principal.uid,
+            revision: 1, pendingOperationId: null, version: 1
+          });
+        transaction.create(input.profileRef, profile);
       }
       if (input.request.verificationMethod === "googleWorkspace") {
         if (!this.googleWorkspaceDomain) throw new ApiError(503, "INTERNAL_ERROR", "La configuración del dominio Workspace no está disponible.");
         const persistedEmail = profileSnapshot.exists
-          ? userDocumentSchema.parse(profileSnapshot.data()).email
+          ? invitationProfileDocumentSchema.parse(profileSnapshot.data()).email
           : input.request.email;
-        if (!persistedEmail.toLowerCase().endsWith(`@${this.googleWorkspaceDomain}`)) {
+        if (!persistedEmail || !persistedEmail.toLowerCase().endsWith(`@${this.googleWorkspaceDomain}`)) {
           throw new ApiError(400, "VALIDATION_ERROR", "El correo del perfil no pertenece al dominio Workspace autorizado.");
         }
       }
@@ -779,7 +808,7 @@ export class InvitationService {
       const operation = adminOperationDocumentSchema.parse(operationSnapshot.data());
       if (operation.status === "completed") return operation.result as InvitationResult;
       if (operation.leaseOwner !== input.requestId) throw new ApiError(409, "OPERATION_IN_PROGRESS", "La operación fue reclamada por otra solicitud.");
-      const profile = userDocumentSchema.safeParse(profileSnapshot.data());
+      const profile = invitationProfileDocumentSchema.safeParse(profileSnapshot.data());
       if (!profile.success) throw new ApiError(409, "PROFILE_REQUIRED", "La cuenta invitada requiere un perfil válido.");
       const updated = invitationDocumentSchema.parse({ ...invitation, pendingOperationId: null, updatedAt: timestamp });
       const result = publicResult(updated, timestamp);

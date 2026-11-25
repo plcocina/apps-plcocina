@@ -99,13 +99,16 @@ export async function prepareAuthCoordinationTransition(input: {
       || stored.data.inputHash !== inputHash) throw new AuthCoordinationPersistenceError("IDEMPOTENCY_CONFLICT");
     return Object.freeze({ previousDocument: document, result: { document, replayed: true }, apply: () => undefined });
   }
-  for (const snapshot of [uidLockSnapshot, subjectLockSnapshot]) {
-    const lock = lockSchema.safeParse(snapshot.data());
-    if (!snapshot.exists || !lock.success || lock.data.operationId !== operationId
-      || lock.data.expectedFirebaseUid !== document.expectedFirebaseUid
-      || lock.data.googleSubjectHash !== document.googleSubjectHash) {
-      throw new AuthCoordinationPersistenceError("LOCK_INCONSISTENT");
-    }
+  const uidLock = lockSchema.safeParse(uidLockSnapshot.data());
+  const subjectLock = lockSchema.safeParse(subjectLockSnapshot.data());
+  if (!uidLockSnapshot.exists || !uidLock.success || uidLock.data.kind !== "uid" || uidLock.data.operationId !== operationId
+    || uidLock.data.keyHash !== canonicalHash(document.expectedFirebaseUid)
+    || uidLock.data.expectedFirebaseUid !== document.expectedFirebaseUid || uidLock.data.googleSubjectHash !== document.googleSubjectHash
+    || !subjectLockSnapshot.exists || !subjectLock.success || subjectLock.data.kind !== "googleSubject"
+    || subjectLock.data.keyHash !== canonicalHash(document.googleSubjectHash)
+    || subjectLock.data.operationId !== operationId || subjectLock.data.expectedFirebaseUid !== document.expectedFirebaseUid
+    || subjectLock.data.googleSubjectHash !== document.googleSubjectHash) {
+    throw new AuthCoordinationPersistenceError("LOCK_INCONSISTENT");
   }
   if (document.revision !== expectedRevision) throw new AuthCoordinationPersistenceError("REVISION_CONFLICT");
   const evaluated = evaluateAuthCoordinationTransition({ document, event: input.event, now: input.now,
@@ -127,8 +130,8 @@ export async function prepareAuthCoordinationTransition(input: {
   return Object.freeze({ previousDocument: document, result: { document: next, replayed: false }, apply: () => {
     input.transaction.set(operationRef, next);
     input.transaction.create(idempotencyRef, idempotency);
-    input.transaction.update(uidLockRef, { state: next.state, revision: next.revision, updatedAt: input.now });
-    input.transaction.update(subjectLockRef, { state: next.state, revision: next.revision, updatedAt: input.now });
+    input.transaction.update(uidLockRef, { state: next.state, revision: uidLock.data.revision + 1, updatedAt: input.now });
+    input.transaction.update(subjectLockRef, { state: next.state, revision: subjectLock.data.revision + 1, updatedAt: input.now });
     input.transaction.create(auditRef, audit);
   } });
 }
@@ -164,12 +167,58 @@ export class AuthCoordinationPersistenceService {
         return { document: authCoordinationDocumentSchema.parse(operationSnapshot.data()), replayed: true };
       }
       if (operationSnapshot.exists) throw new AuthCoordinationPersistenceError("OPERATION_CONFLICT");
-      if (uidLockSnapshot.exists) throw new AuthCoordinationPersistenceError("UID_LOCK_CONFLICT");
-      if (subjectLockSnapshot.exists) throw new AuthCoordinationPersistenceError("SUBJECT_LOCK_CONFLICT");
       const timestamp = this.now();
+      let lockRevisions = { uid: 0, subject: 0 };
+      let lockCreatedAt = { uid: timestamp, subject: timestamp };
+      let previousOperationId: string | null = null;
+      let previousState: AuthCoordinationDocument["state"] | null = null;
+      if (uidLockSnapshot.exists || subjectLockSnapshot.exists) {
+        if (uidLockSnapshot.exists && !subjectLockSnapshot.exists) {
+          throw new AuthCoordinationPersistenceError("UID_LOCK_CONFLICT");
+        }
+        if (!uidLockSnapshot.exists && subjectLockSnapshot.exists) {
+          throw new AuthCoordinationPersistenceError("SUBJECT_LOCK_CONFLICT");
+        }
+        const uidLock = lockSchema.safeParse(uidLockSnapshot.data());
+        const subjectLock = lockSchema.safeParse(subjectLockSnapshot.data());
+        if (!uidLock.success || !subjectLock.success || uidLock.data.kind !== "uid" || subjectLock.data.kind !== "googleSubject"
+          || uidLock.data.keyHash !== canonicalHash(document.expectedFirebaseUid)
+          || subjectLock.data.keyHash !== canonicalHash(document.googleSubjectHash)
+          || uidLock.data.operationId !== subjectLock.data.operationId
+          || uidLock.data.expectedFirebaseUid !== document.expectedFirebaseUid
+          || subjectLock.data.expectedFirebaseUid !== document.expectedFirebaseUid
+          || uidLock.data.googleSubjectHash !== document.googleSubjectHash
+          || subjectLock.data.googleSubjectHash !== document.googleSubjectHash) {
+          throw new AuthCoordinationPersistenceError(uidLock.success ? "SUBJECT_LOCK_CONFLICT" : "UID_LOCK_CONFLICT");
+        }
+        const previousRef = this.db.collection("identityAuthCoordinations").doc(uidLock.data.operationId);
+        const previousSnapshot = await transaction.get(previousRef);
+        const previous = previousSnapshot.exists ? authCoordinationDocumentSchema.safeParse(previousSnapshot.data()) : null;
+        if (!previousSnapshot.exists || !previous?.success
+          || previous.data.expectedFirebaseUid !== document.expectedFirebaseUid
+          || previous.data.expectedInternalUid !== document.expectedInternalUid
+          || previous.data.googleSubjectHash !== document.googleSubjectHash
+          || uidLock.data.state !== previous.data.state || subjectLock.data.state !== previous.data.state
+          || uidLock.data.revision < previous.data.revision || subjectLock.data.revision < previous.data.revision) {
+          throw new AuthCoordinationPersistenceError("LOCK_INCONSISTENT");
+        }
+        const safeTerminal = previous.data.state === "cancelled"
+          && ["CHALLENGE_EXPIRED", "AUTHORIZATION_REVOKED"].includes(previous.data.conflictReason ?? "");
+        const expiredChallenge = previous.data.state === "challenge_issued"
+          && previous.data.evidence.challenge !== null
+          && previous.data.evidence.challenge.expiresAt.toMillis() <= timestamp.toMillis();
+        const expiredBeforeExternalLink = previous.data.expiresAt.toMillis() <= timestamp.toMillis()
+          && ["not_started", "challenge_issued", "google_proof_verified"].includes(previous.data.state);
+        if (!safeTerminal && !expiredChallenge && !expiredBeforeExternalLink) {
+          throw new AuthCoordinationPersistenceError("UID_LOCK_CONFLICT");
+        }
+        lockRevisions = { uid: uidLock.data.revision, subject: subjectLock.data.revision };
+        lockCreatedAt = { uid: uidLock.data.createdAt, subject: subjectLock.data.createdAt };
+        previousOperationId = previous.data.operationId;
+        previousState = previous.data.state;
+      }
       const baseLock = { operationId: document.operationId, expectedFirebaseUid: document.expectedFirebaseUid,
-        googleSubjectHash: document.googleSubjectHash, state: document.state, revision: 1,
-        createdAt: timestamp, updatedAt: timestamp, version: 1 as const };
+        googleSubjectHash: document.googleSubjectHash, state: document.state, updatedAt: timestamp, version: 1 as const };
       const idempotency = idempotencySchema.parse({ idempotencyKey: document.idempotencyKey,
         operationId: document.operationId, kind: "create", inputHash, resultingRevision: 1, createdAt: timestamp, version: 1 });
       const audit = auditEventDocumentSchema.parse({ occurredAt: timestamp, actorType: "admin", actorUid,
@@ -179,9 +228,21 @@ export class AuthCoordinationPersistenceService {
         reason: "Firebase Auth coordination created", requestId: document.operationId, source: "admin-api", result: "success", version: 1 });
       transaction.create(operationRef, document);
       transaction.create(idempotencyRef, idempotency);
-      transaction.create(uidLockRef, lockSchema.parse({ ...baseLock, kind: "uid", keyHash: canonicalHash(document.expectedFirebaseUid) }));
-      transaction.create(subjectLockRef, lockSchema.parse({ ...baseLock, kind: "googleSubject", keyHash: canonicalHash(document.googleSubjectHash) }));
+      transaction.set(uidLockRef, lockSchema.parse({ ...baseLock, createdAt: lockCreatedAt.uid, kind: "uid", revision: lockRevisions.uid + 1,
+        keyHash: canonicalHash(document.expectedFirebaseUid) }));
+      transaction.set(subjectLockRef, lockSchema.parse({ ...baseLock, createdAt: lockCreatedAt.subject, kind: "googleSubject", revision: lockRevisions.subject + 1,
+        keyHash: canonicalHash(document.googleSubjectHash) }));
       transaction.create(auditRef, audit);
+      if (previousOperationId !== null && previousState !== null) {
+        transaction.create(this.db.collection("auditEvents").doc(`auth-coordination-reconciled-${document.operationId}`),
+          auditEventDocumentSchema.parse({ occurredAt: timestamp, actorType: "admin", actorUid, actorEmail: null,
+            providerEventId: null, action: "identity.coordination_locks_reconciled", resourceType: "user",
+            resourceId: document.expectedFirebaseUid, targetUid: document.expectedFirebaseUid, appId: null,
+            before: { operationId: previousOperationId, state: previousState },
+            after: { operationId: document.operationId, state: document.state, revision: 1 },
+            reason: "Expired coordination locks safely reacquired", requestId: document.operationId,
+            source: "admin-api", result: "success", version: 1 }));
+      }
       return { document, replayed: false };
     });
   }

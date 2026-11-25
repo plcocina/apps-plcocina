@@ -47,7 +47,7 @@ h1 { margin: 0; max-width: 530px; font-size: clamp(38px, 5vw, 60px); line-height
 .accept-card { width: 100%; min-height: 500px; padding: 30px 32px 34px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 24px 65px rgb(43 41 17 / 10%); }
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 0 34px; padding: 0; list-style: none; }
 .steps li { display: flex; align-items: center; gap: 7px; padding-bottom: 11px; border-bottom: 2px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 700; }
-.steps li span { width: 23px; height: 23px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); font-size: 10px; }
+.steps li span:first-child { width: 23px; height: 23px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); font-size: 10px; }
 .steps li.current { border-color: var(--brand-yellow); color: var(--brand-dark); }
 .steps li.complete { border-color: var(--success); color: var(--success); }
 
@@ -57,6 +57,8 @@ h1 { margin: 0; max-width: 530px; font-size: clamp(38px, 5vw, 60px); line-height
 .spinner { width: 34px; height: 34px; border: 3px solid var(--line); border-top-color: var(--brand-dark); border-radius: 50%; animation: spin .8s linear infinite; }
 .status-mark { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 13px; background: var(--brand-dark); color: var(--brand-yellow); }
 .status-mark svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.google-mark { width: 36px; height: 36px; border-radius: 10px; }
+.google-mark svg { width: 18px; height: 18px; }
 .status-mark.success { background: #eaf5ec; color: var(--success); }
 .status-mark.failure { background: #fff1ef; color: var(--danger); }
 

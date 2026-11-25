@@ -3,7 +3,12 @@ import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 
-if (process.env.FIREBASE_AUTH_EMULATOR_HOST !== "127.0.0.1:9099" || process.env.FIRESTORE_EMULATOR_HOST !== "127.0.0.1:8080") {
+const authHost = process.env.FIREBASE_AUTH_EMULATOR_HOST;
+const firestoreHost = process.env.FIRESTORE_EMULATOR_HOST;
+const functionsHost = process.env.E2E_FUNCTIONS_EMULATOR_HOST ?? "127.0.0.1:5001";
+const isLoopbackHost = (value) => /^127\.0\.0\.1:\d{1,5}$/.test(value ?? "")
+  && Number(value.slice(value.lastIndexOf(":") + 1)) <= 65535;
+if (!isLoopbackHost(authHost) || !isLoopbackHost(firestoreHost) || !isLoopbackHost(functionsHost)) {
   throw new Error("Este script sólo puede ejecutarse contra los emuladores locales aprobados.");
 }
 
@@ -11,7 +16,7 @@ const projectId = "demo-plcocina-apps";
 const app = initializeApp({ projectId }, `e2e-${randomUUID()}`);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const functionBase = "http://127.0.0.1:5001/demo-plcocina-apps/us-central1/adminApi";
+const functionBase = `http://${functionsHost}/demo-plcocina-apps/us-central1/adminApi`;
 const origin = "http://127.0.0.1:5002";
 const command = process.argv[2];
 const revealLinks = process.env.E2E_REVEAL_LINKS === "true";
@@ -25,7 +30,7 @@ async function authToken() {
     await auth.createUser({ uid, email, password, emailVerified: true });
   });
   await auth.setCustomUserClaims(uid, { super_admin: true });
-  const response = await fetch(`http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake`, {
+  const response = await fetch(`http://${authHost}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password, returnSecureToken: true })
   });

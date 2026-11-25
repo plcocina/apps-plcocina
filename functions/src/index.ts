@@ -28,6 +28,9 @@ const firestore = getFirestore();
 const emulatorMode =
   process.env.FUNCTIONS_EMULATOR === "true"
   && process.env.GCLOUD_PROJECT === "demo-plcocina-apps";
+const localInvitationAccessEnabled = emulatorMode
+  && process.env.FIREBASE_AUTH_EMULATOR_HOST === "127.0.0.1:9099"
+  && process.env.FIRESTORE_EMULATOR_HOST === "127.0.0.1:8080";
 
 const invitationTokens = emulatorMode
   ? new InvitationTokenKeyring(new Map([[1, Buffer.alloc(32, 0x5a)]]), 1)
@@ -47,10 +50,11 @@ const app = createAdminApp({
     revokeRefreshTokens: (uid) => auth.revokeRefreshTokens(uid),
     createUser: (properties) => auth.createUser(properties)
   },
-  protectedSuperAdminUid: emulatorMode ? "emulator-protected-super-admin" : protectedSuperAdminUid(),
+  protectedSuperAdminUid: protectedSuperAdminUid() ?? (emulatorMode ? "emulator-protected-super-admin" : null),
   googleWorkspaceDomain: googleWorkspaceDomainParam.value(),
   invitationTokens,
   invitationEmailProvider,
+  localInvitationAccessEnabled,
   resendWebhook: { enabled: false },
   googleBootstrapComposition: () => createInternalGoogleBootstrapComposition(
     firestore, internalAuthOrchestrationConfiguration()

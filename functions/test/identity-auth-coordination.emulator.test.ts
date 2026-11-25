@@ -41,7 +41,7 @@ function document(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function service() { return new AuthCoordinationPersistenceService(db, adminUid, () => Timestamp.fromMillis(clock.toMillis() + 1_000)); }
+function service(now = Timestamp.fromMillis(clock.toMillis() + 1_000)) { return new AuthCoordinationPersistenceService(db, adminUid, () => now); }
 
 function event(value: ReturnType<typeof document>, type: "challenge_issued" | "provider_result_unknown" = "challenge_issued",
   overrides: Record<string, unknown> = {}) {
@@ -90,6 +90,80 @@ describe("persistent transactional auth coordination", () => {
     const second = document({ googleSubjectHash: first.googleSubjectHash });
     const results = await Promise.allSettled([create(first), create(second)]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+  });
+
+  it("atomically reclaims matching locks after the prior challenge expires and preserves history", async () => {
+    const prior = document(); await create(prior);
+    await service().transition({ trustedAdministratorUid: adminUid, operationId: prior.operationId,
+      expectedRevision: 1, event: event(prior) });
+    const next = document({ expectedFirebaseUid: prior.expectedFirebaseUid, expectedInternalUid: prior.expectedInternalUid,
+      googleSubjectHash: prior.googleSubjectHash });
+    const reclaimed = await service(Timestamp.fromMillis(clock.toMillis() + 301_000)).create({
+      trustedAdministratorUid: adminUid, document: next
+    });
+    expect(reclaimed).toMatchObject({ replayed: false, document: { operationId: next.operationId, revision: 1 } });
+    expect((await service().get(prior.operationId)).state).toBe("challenge_issued");
+    const locks = await db.collection("identityAuthCoordinationLocks").where("operationId", "==", next.operationId).get();
+    expect(locks.size).toBe(2);
+    const audits = await db.collection("auditEvents").where("resourceId", "==", prior.expectedFirebaseUid).get();
+    expect(audits.size).toBe(4);
+    const locksAfterReclaim = (await db.collection("identityAuthCoordinationLocks")
+      .where("operationId", "==", next.operationId).get()).docs;
+    expect(locksAfterReclaim.every((item) => item.data().revision === 3)).toBe(true);
+    const transitionNow = Timestamp.fromMillis(clock.toMillis() + 302_000);
+    const nextChallenge = event(next, "challenge_issued", { challenge: { challengeId: randomUUID(),
+      issuedBy: "identity-challenge-service", issuedAt: transitionNow,
+      expiresAt: Timestamp.fromMillis(transitionNow.toMillis() + 300_000) } });
+    await service(transitionNow).transition({ trustedAdministratorUid: adminUid, operationId: next.operationId,
+      expectedRevision: 1, event: nextChallenge });
+    const locksAfterTransition = (await db.collection("identityAuthCoordinationLocks")
+      .where("operationId", "==", next.operationId).get()).docs;
+    expect(locksAfterTransition.every((item) => item.data().revision === 4)).toBe(true);
+  });
+
+  it("does not reclaim a live prior challenge", async () => {
+    const prior = document(); await create(prior);
+    await service().transition({ trustedAdministratorUid: adminUid, operationId: prior.operationId,
+      expectedRevision: 1, event: event(prior) });
+    const next = document({ expectedFirebaseUid: prior.expectedFirebaseUid, expectedInternalUid: prior.expectedInternalUid,
+      googleSubjectHash: prior.googleSubjectHash });
+    await rejected(create(next), "UID_LOCK_CONFLICT");
+    expect((await service().get(prior.operationId)).state).toBe("challenge_issued");
+  });
+
+  it("does not reclaim a UID lock for a different Google subject", async () => {
+    const prior = document(); await create(prior);
+    const next = document({ expectedFirebaseUid: prior.expectedFirebaseUid, expectedInternalUid: prior.expectedInternalUid });
+    await rejected(create(next), "UID_LOCK_CONFLICT");
+    expect((await service().get(prior.operationId)).state).toBe("not_started");
+  });
+
+  it("replays a recovered create with the same idempotency identity", async () => {
+    const prior = document(); await create(prior);
+    await service().transition({ trustedAdministratorUid: adminUid, operationId: prior.operationId,
+      expectedRevision: 1, event: event(prior) });
+    const next = document({ expectedFirebaseUid: prior.expectedFirebaseUid, expectedInternalUid: prior.expectedInternalUid,
+      googleSubjectHash: prior.googleSubjectHash });
+    const afterExpiry = service(Timestamp.fromMillis(clock.toMillis() + 301_000));
+    await afterExpiry.create({ trustedAdministratorUid: adminUid, document: next });
+    const replay = await afterExpiry.create({ trustedAdministratorUid: adminUid, document: next });
+    expect(replay).toMatchObject({ replayed: true, document: { operationId: next.operationId } });
+  });
+
+  it("allows only one concurrent claimant when both see expired matching locks", async () => {
+    const prior = document(); await create(prior);
+    await service().transition({ trustedAdministratorUid: adminUid, operationId: prior.operationId,
+      expectedRevision: 1, event: event(prior) });
+    const shared = { expectedFirebaseUid: prior.expectedFirebaseUid, expectedInternalUid: prior.expectedInternalUid,
+      googleSubjectHash: prior.googleSubjectHash };
+    const first = document(shared); const second = document(shared);
+    const afterExpiry = service(Timestamp.fromMillis(clock.toMillis() + 301_000));
+    const results = await Promise.allSettled([first, second].map((value) => afterExpiry.create({
+      trustedAdministratorUid: adminUid, document: value
+    })));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const locks = await db.collection("identityAuthCoordinationLocks").where("expectedFirebaseUid", "==", prior.expectedFirebaseUid).get();
+    expect(new Set(locks.docs.map((item) => item.data().operationId)).size).toBe(1);
   });
 
   it("rejects operation and idempotency reuse with different parameters", async () => {

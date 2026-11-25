@@ -412,9 +412,11 @@ export class GoogleIdentityLinkingService {
       if (!profile.success || profile.data.uid !== trustedTargetUid) {
         throw new GoogleIdentityLinkError("IDENTITY_STATE_INVALID", "El perfil no satisface el contrato Google v2.1.");
       }
+      const alreadyLinked = profile.data.googleWorkspace.linkingStatus === "linked"
+        && profile.data.activationStatus === "linked_pending_activation";
       if (profile.data.status === "disabled"
         || profile.data.activationStatus === "reconciliation_required"
-        || profile.data.googleWorkspace.linkingStatus !== "verified"
+        || (profile.data.googleWorkspace.linkingStatus !== "verified" && !alreadyLinked)
         || profile.data.googleWorkspace.verificationStatus !== "verified"
         || profile.data.authDisabled !== true) {
         throw new GoogleIdentityLinkError("IDENTITY_STATE_INVALID", "El estado actual no permite vinculación.");
@@ -444,10 +446,10 @@ export class GoogleIdentityLinkingService {
         googleWorkspace: {
           ...profile.data.googleWorkspace,
           linkingStatus: "linked",
-          linkedAt: timestamp,
+          linkedAt: alreadyLinked ? profile.data.googleWorkspace.linkedAt : timestamp,
           operationId: null
         },
-        credentialRevision: profile.data.credentialRevision + 1,
+        credentialRevision: alreadyLinked ? profile.data.credentialRevision : profile.data.credentialRevision + 1,
         updatedAt: timestamp,
         updatedBy: trustedAdministratorUid,
         revision,
@@ -470,7 +472,7 @@ export class GoogleIdentityLinkingService {
         actorUid: trustedAdministratorUid,
         actorEmail: null,
         providerEventId: null,
-        action: "google.identity_linked",
+        action: alreadyLinked ? "google.identity_link_reconfirmed" : "google.identity_linked",
         resourceType: "user",
         resourceId: trustedTargetUid,
         targetUid: trustedTargetUid,

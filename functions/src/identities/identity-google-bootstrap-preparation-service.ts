@@ -83,7 +83,7 @@ export class GoogleBootstrapPreparationService {
     if (principal.superAdmin !== true || principal.uid !== this.protectedSuperAdminUid) throw new GoogleBootstrapPreparationError("ADMIN_REQUIRED");
     const evidence = await this.loadProof(value.proofId);
     const initial = await this.resolveCurrent(evidence);
-    const plan = await this.ensurePlan(evidence, initial.profileRevision, initial.profileIsV2, principal);
+    const plan = await this.ensurePlan(evidence, initial.profileRevision, initial.profileNeedsVerification, principal);
     this.assertPlan(plan, evidence);
     this.assertNotExpired(plan);
 
@@ -142,6 +142,21 @@ export class GoogleBootstrapPreparationService {
       state: coordination.document.state, replayed: reservation.replayed || linkResult.replayed || coordination.replayed });
   }
 
+  async prepareLatestForInvitation(invitationIdInput: unknown, principalInput: AdminPrincipal) {
+    const invitationId = z.string().uuid().parse(invitationIdInput);
+    const invitation = await this.db.collection("invitations").doc(invitationId).get();
+    const parsed = invitationDocumentSchema.safeParse(invitation.data());
+    if (!invitation.exists || !parsed.success || parsed.data.verificationMethod !== "googleWorkspace"
+      || !parsed.data.uid || parsed.data.status !== "active") throw new GoogleBootstrapPreparationError("INVITATION_INVALID");
+    const proofs = await this.db.collection("identityVerifiedGoogleProofs").where("invitationId", "==", invitationId).get();
+    const latest = proofs.docs.flatMap((doc) => {
+      const proof = identityVerifiedGoogleProofSchema.safeParse(doc.data());
+      return proof.success && proof.data.state === "verified" && proof.data.nonceVerified ? [proof.data] : [];
+    }).sort((a, b) => b.verifiedAt.toMillis() - a.verifiedAt.toMillis())[0];
+    if (!latest) throw new GoogleBootstrapPreparationError("PROOF_NOT_FOUND");
+    return this.prepare({ proofId: latest.proofId }, principalInput);
+  }
+
   private async loadProof(proofId: string) {
     const snapshot = await this.db.collection("identityVerifiedGoogleProofs").doc(proofId).get();
     if (!snapshot.exists) throw new GoogleBootstrapPreparationError("PROOF_NOT_FOUND");
@@ -171,15 +186,24 @@ export class GoogleBootstrapPreparationService {
     if (legacyProfile.success && (legacyProfile.data.status !== "invited" || legacyProfile.data.authDisabled !== true
       || legacyProfile.data.email === null || legacyProfile.data.email === undefined
       || normalizeIdentityEmail(legacyProfile.data.email) !== evidence.normalizedEmail)) throw new GoogleBootstrapPreparationError("PROFILE_INVALID");
-    if (workspaceProfile.success && (workspaceProfile.data.uid !== evidence.uid || workspaceProfile.data.status !== "invited"
-      || workspaceProfile.data.authDisabled !== true || workspaceProfile.data.email !== evidence.normalizedEmail
-      || workspaceProfile.data.googleWorkspace.subject !== evidence.subject
-      || workspaceProfile.data.googleWorkspace.verificationStatus !== "verified")) throw new GoogleBootstrapPreparationError("PROFILE_CONFLICT");
-    return { profileRevision: revision, profileIsV2: legacyProfile.success };
+    let workspaceNeedsVerification = false;
+    if (workspaceProfile.success) {
+      const workspace = workspaceProfile.data.googleWorkspace;
+      const declared = workspace.linkingStatus === "declared" && workspace.verificationStatus === "unverified" && workspace.subject === null;
+      const verifiedOrLinked = workspace.verificationStatus === "verified" && workspace.subject === evidence.subject
+        && (workspace.linkingStatus === "verified" || workspace.linkingStatus === "linked");
+      const emailDomain = normalizeWorkspaceDomain(evidence.normalizedEmail.slice(evidence.normalizedEmail.lastIndexOf("@") + 1));
+      if (workspaceProfile.data.uid !== evidence.uid || workspaceProfile.data.status !== "invited"
+        || workspaceProfile.data.authDisabled !== true || workspaceProfile.data.email !== evidence.normalizedEmail
+        || workspace.authorizedDomain !== emailDomain
+        || (!declared && !verifiedOrLinked)) throw new GoogleBootstrapPreparationError("PROFILE_CONFLICT");
+      workspaceNeedsVerification = declared;
+    }
+    return { profileRevision: revision, profileNeedsVerification: legacyProfile.success || workspaceNeedsVerification };
   }
 
   private async ensurePlan(evidence: Awaited<ReturnType<GoogleBootstrapPreparationService["loadProof"]>>,
-    profileRevision: number, profileIsV2: boolean, principal: AdminPrincipal) {
+    profileRevision: number, profileNeedsVerification: boolean, principal: AdminPrincipal) {
     const ref = this.db.collection("identityGoogleBootstrapPreparations").doc(evidence.proofId);
     const proofHash = hashIdentityVerifiedGoogleProof(evidence);
     return this.db.runTransaction(async (transaction) => {
@@ -210,7 +234,7 @@ export class GoogleBootstrapPreparationService {
       const plan = identityGoogleBootstrapPreparationPlanSchema.parse({ proofId: evidence.proofId, proofHash, invitationId: evidence.invitationId,
         uid: evidence.uid, subjectHash: identifierKeyHash("googleSubject", evidence.subject, this.identifierPepper),
         normalizedEmail: evidence.normalizedEmail, credentialGeneration: evidence.credentialGeneration,
-        verifiedProfileRevision: profileRevision + (profileIsV2 ? 1 : 0),
+        verifiedProfileRevision: profileRevision + (profileNeedsVerification ? 1 : 0),
         reservationOperationId: uuidFor(evidence.proofId, "reservation"), authorizationId: uuidFor(evidence.proofId, "authorization"),
         linkOperationId: uuidFor(evidence.proofId, "e4b2-operation"), linkIdempotencyKey: uuidFor(evidence.proofId, "e4b2-idempotency"),
         coordinationOperationId: uuidFor(evidence.proofId, "e5b2-operation"), coordinationIdempotencyKey: uuidFor(evidence.proofId, "e5b2-idempotency"),
@@ -260,13 +284,40 @@ export class GoogleBootstrapPreparationService {
         return verified;
       }
       const existing = googleWorkspaceUserV21DocumentSchema.safeParse(profileSnapshot.data());
+      if (existing.success && existing.data.googleWorkspace.linkingStatus === "declared"
+        && existing.data.googleWorkspace.verificationStatus === "unverified" && existing.data.googleWorkspace.subject === null) {
+        if (existing.data.uid !== evidence.uid || existing.data.status !== "invited" || !existing.data.authDisabled
+          || existing.data.email !== evidence.normalizedEmail || existing.data.revision + 1 !== plan.verifiedProfileRevision) {
+          throw new GoogleBootstrapPreparationError("PROFILE_CONFLICT");
+        }
+        const domain = normalizeWorkspaceDomain(evidence.normalizedEmail.slice(evidence.normalizedEmail.lastIndexOf("@") + 1));
+        const verified = googleWorkspaceUserV21DocumentSchema.parse({
+          ...existing.data, emailVerifiedAt: evidence.verifiedAt,
+          googleWorkspace: { ...existing.data.googleWorkspace, authorizedDomain: domain, subject: evidence.subject,
+            linkingStatus: "verified", verificationStatus: "verified", verifiedAt: evidence.verifiedAt,
+            verificationRevision: existing.data.googleWorkspace.verificationRevision + 1, operationId: null },
+          activationStatus: "recovery_required", credentialRevision: existing.data.credentialRevision + 1,
+          updatedAt: this.now(), updatedBy: principal.uid, revision: plan.verifiedProfileRevision
+        });
+        transaction.set(profileRef, verified);
+        transaction.create(this.db.collection("auditEvents").doc(`google-bootstrap-proof-${evidence.proofId}`), auditEventDocumentSchema.parse({
+          occurredAt: this.now(), actorType: "admin", actorUid: principal.uid, actorEmail: principal.email, providerEventId: null,
+          action: "identity.google_proof_recorded", resourceType: "user", resourceId: evidence.uid, targetUid: evidence.uid, appId: null,
+          before: { revision: existing.data.revision, authDisabled: true }, after: { revision: plan.verifiedProfileRevision,
+            verificationStatus: "verified", authDisabled: true, subjectHash: plan.subjectHash }, reason: "Invitación Google verificada",
+          requestId: evidence.proofId, source: "admin-api", result: "success", version: 1
+        }));
+        return verified;
+      }
       const verifiedUnlinked = existing.success && existing.data.googleWorkspace.linkingStatus === "verified"
         && existing.data.revision === plan.verifiedProfileRevision;
-      const linked = existing.success && existing.data.googleWorkspace.linkingStatus === "linked"
+      const alreadyLinked = existing.success && existing.data.googleWorkspace.linkingStatus === "linked"
+        && existing.data.activationStatus === "linked_pending_activation" && existing.data.revision === plan.verifiedProfileRevision;
+      const linkedByThisPreparation = existing.success && existing.data.googleWorkspace.linkingStatus === "linked"
         && existing.data.activationStatus === "linked_pending_activation" && existing.data.revision === plan.verifiedProfileRevision + 1;
       if (!existing.success || existing.data.uid !== evidence.uid || existing.data.googleWorkspace.subject !== evidence.subject
         || existing.data.email !== evidence.normalizedEmail || existing.data.googleWorkspace.verificationStatus !== "verified"
-        || (!verifiedUnlinked && !linked)
+        || (!verifiedUnlinked && !alreadyLinked && !linkedByThisPreparation)
         || existing.data.authDisabled !== true || existing.data.status !== "invited") throw new GoogleBootstrapPreparationError("PROFILE_CONFLICT");
       return existing.data;
     });

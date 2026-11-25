@@ -1,4 +1,5 @@
 import { adminApiRequest, AdminApiError } from "./admin-api-client.js";
+import { isLocalPilot } from "./firebase-client-config.js";
 
 const PAGE_SIZE = 25;
 const invitationLabels = {
@@ -234,6 +235,16 @@ export function initializeInvitations(user, options = {}) {
         button.disabled = operations.isActive(invitation.invitationId);
         actionWrap.append(button);
       }
+      if (isLocalPilot() && invitation.status === "active" && invitation.revision !== null) {
+        const continueButton = element("button", "", "Continuar verificación Google");
+        continueButton.type = "button";
+        continueButton.dataset.continueGoogleVerification = invitation.invitationId;
+        actionWrap.append(continueButton);
+        const button = element("button", "", "Abrir invitación de prueba");
+        button.type = "button";
+        button.dataset.openTestInvitation = invitation.invitationId;
+        actionWrap.append(button);
+      }
       if (!actionWrap.childElementCount) actionWrap.append(element("span", "summary-note", "Sin acciones disponibles"));
       actions.append(actionWrap);
       row.append(recipient, status, delivery, created, validity, acceptance, actions);
@@ -427,11 +438,69 @@ export function initializeInvitations(user, options = {}) {
   byId("cancel-create-invitation").addEventListener("click", () => createDialog.close());
   byId("close-create-invitation").addEventListener("click", () => createDialog.close());
   tbody.addEventListener("click", (event) => {
+    const continueButton = event.target.closest("button[data-continue-google-verification]");
+    if (continueButton) {
+      void continueGoogleVerification(continueButton.dataset.continueGoogleVerification, continueButton);
+      return;
+    }
+    const openButton = event.target.closest("button[data-open-test-invitation]");
+    if (openButton) {
+      void openSimulatedInvitation(openButton.dataset.openTestInvitation, openButton);
+      return;
+    }
     const button = event.target.closest("button[data-invitation-action]");
     if (!button) return;
     const invitation = visibleInvitations.get(button.dataset.invitationId);
     if (invitation) openAction(invitation, button.dataset.invitationAction);
   });
+
+  async function continueGoogleVerification(invitationId, button) {
+    if (!isLocalPilot() || !invitationId || button.disabled) return;
+    button.disabled = true;
+    const idempotencyKey = globalThis.crypto.randomUUID();
+    try {
+      const result = await adminApiRequest(user, "/api/admin/identities/google-bootstrap/continue", {
+        method: "POST", idempotencyKey, body: { invitationId, idempotencyKey }
+      });
+      const expiry = new Date(result.expiresAt);
+      if (result.state !== "challenge_issued" || Number.isNaN(expiry.getTime())) throw new Error("INVALID_RESPONSE");
+      feedback(`Segundo Challenge emitido. Vence: ${dateLabel(result.expiresAt)}.`);
+    } catch (error) {
+      if (error?.status === 409 && error?.message === "Es necesario repetir la verificación inicial con Google.") {
+        feedback("Es necesario repetir la verificación inicial con Google.", true);
+      } else {
+        const status = Number.isInteger(error?.status) ? error.status : "sin HTTP";
+        const code = typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : "ERROR_DESCONOCIDO";
+        feedback(`No fue posible continuar la verificación Google (HTTP ${status} · ${code}).`, true);
+      }
+    } finally { button.disabled = false; }
+  }
+
+  async function openSimulatedInvitation(invitationId, button) {
+    if (!isLocalPilot() || !invitationId || button.disabled) return;
+    button.disabled = true;
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/admin/invitations/${encodeURIComponent(invitationId)}/open-test`, {
+        method: "POST",
+        headers: { Accept: "application/json", Authorization: `Bearer ${idToken}` },
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer"
+      });
+      const payload = await response.json().catch(() => null);
+      const invitation = payload?.data;
+      if (!response.ok || payload?.ok !== true || invitation?.invitationId !== invitationId
+        || typeof invitation?.token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(invitation.token)) {
+        throw new Error("INVITATION_LINK_UNAVAILABLE");
+      }
+      const fragment = new URLSearchParams({ invitationId, token: invitation.token });
+      location.assign(`/accept-invitation#${fragment.toString()}`);
+    } catch {
+      button.disabled = false;
+      feedback("No fue posible abrir la invitación de prueba.", true);
+    }
+  }
   actionReason.addEventListener("input", () => actionReason.setCustomValidity(""));
   actionForm.addEventListener("submit", submitAction);
   byId("cancel-invitation-operation").addEventListener("click", () => actionDialog.close());

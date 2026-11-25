@@ -14,7 +14,7 @@ import { UserQueryService, type UserDirectory } from "./users/user-query-service
 import { UserControlService, type UserControlAction } from "./users/user-control-service.js";
 import { userOperationResponseSchema } from "./http/contracts.js";
 import { InvitationService } from "./invitations/invitation-service.js";
-import { DisabledInvitationEmailProvider, type InvitationEmailProvider } from "./invitations/invitation-email-provider.js";
+import { DisabledInvitationEmailProvider, SimulatedInvitationEmailProvider, type InvitationEmailProvider } from "./invitations/invitation-email-provider.js";
 import type { InvitationTokenKeyring } from "./invitations/invitation-token.js";
 import { InvitationAcceptanceService } from "./invitations/invitation-acceptance-service.js";
 import { requireAuthenticatedUser, type AuthenticatedRequest } from "./auth/require-authenticated-user.js";
@@ -40,6 +40,7 @@ export type AdminApiDependencies = {
   googleWorkspaceDomain?: string | null;
   invitationTokens?: InvitationTokenKeyring | null;
   invitationEmailProvider?: InvitationEmailProvider;
+  localInvitationAccessEnabled?: boolean;
   resendWebhook?: { enabled: boolean; secret?: string; replayStore?: WebhookReplayStore };
   googleBootstrapComposition?: () => InternalGoogleBootstrapComposition;
   invitationGoogleProofService?: () => InvitationGoogleProofService;
@@ -304,6 +305,31 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
     }
   });
 
+  app.post("/api/admin/identities/google-bootstrap/continue", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      const principal = principalFrom(request);
+      const body = z.object({ invitationId: z.string().uuid(), idempotencyKey: z.string().uuid() }).strict().parse(request.body);
+      if (dependencies.localInvitationAccessEnabled !== true || request.header("origin") !== "https://localhost:8443") {
+        throw new ApiError(404, "NOT_FOUND", "La operación no está disponible.");
+      }
+      if (!dependencies.googleBootstrapPreparationService || !dependencies.googleBootstrapComposition) {
+        throw new ApiError(503, "INTERNAL_ERROR", "La preparación Google no está disponible.");
+      }
+      const prepared = await dependencies.googleBootstrapPreparationService().prepareLatestForInvitation(body.invitationId, principal);
+      const challenge = await dependencies.googleBootstrapComposition().issue({ principal,
+        authorizationId: prepared.authorizationId, idempotencyKey: body.idempotencyKey });
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.status(200).json({ ok: true, data: { state: "challenge_issued", expiresAt: challenge.expiresAt instanceof Timestamp
+        ? challenge.expiresAt.toDate().toISOString() : new Date(challenge.expiresAt).toISOString() },
+        requestId: requestIdFrom(response) });
+    } catch (error) {
+      if (error instanceof GoogleBootstrapPreparationError && error.code === "PROOF_EXPIRED") {
+        next(new ApiError(409, "INVALID_STATE_TRANSITION", "Es necesario repetir la verificación inicial con Google.")); return;
+      }
+      next(error);
+    }
+  });
+
   app.post("/api/admin/identities/google-bootstrap/authorizations", authenticate, async (request: AdminRequest, response, next) => {
     try {
       const principal = principalFrom(request);
@@ -473,6 +499,21 @@ export function createAdminApp(dependencies: AdminApiDependencies) {
         idempotencyKey: request.header("Idempotency-Key"), principal: principalFrom(request), requestId: requestIdFrom(response)
       });
       response.status(200).json(invitationResponseSchema.parse({ ok: true, data, requestId: requestIdFrom(response) }));
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/admin/invitations/:invitationId/open-test", authenticate, async (request: AdminRequest, response, next) => {
+    try {
+      principalFrom(request);
+      if (dependencies.localInvitationAccessEnabled !== true
+        || !(dependencies.invitationEmailProvider instanceof SimulatedInvitationEmailProvider)
+        || request.header("origin") !== "https://localhost:8443") {
+        throw new ApiError(404, "NOT_FOUND", "La invitación no está disponible.");
+      }
+      const data = await invitationService().simulatedInvitationLink(routeParam(request.params.invitationId));
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+      response.setHeader("Referrer-Policy", "no-referrer");
+      response.status(200).json({ ok: true, data, requestId: requestIdFrom(response) });
     } catch (error) { next(error); }
   });
 

@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
 import {
   browserSessionPersistence,
+  connectAuthEmulator,
   getAuth,
   onAuthStateChanged,
   setPersistence,
@@ -11,12 +12,15 @@ import {
   AdminApiError,
   verifySuperAdminSession
 } from "/assets/admin-api-client.js";
-import { firebaseConfig } from "/assets/firebase-client-config.js";
+import { firebaseConfigForLocation, isLocalPilot } from "/assets/firebase-client-config.js";
+import { signInFailureMessage } from "/assets/admin-auth-diagnostics.js";
 import { initializeApplications } from "/assets/admin-applications.js";
 import { initializeUsers } from "/assets/admin-users.js";
-import { initializeInvitations } from "/assets/admin-invitations.js";
+import { initializeInvitations } from "/assets/admin-invitations.js?local-invitation-access=1";
 
-const EXPECTED_PROJECT_ID = "plcocina-apps";
+const localPilot = isLocalPilot();
+const firebaseConfig = firebaseConfigForLocation();
+const EXPECTED_PROJECT_ID = localPilot ? "demo-plcocina-apps" : "plcocina-apps";
 
 if (firebaseConfig.projectId !== EXPECTED_PROJECT_ID) {
   throw new Error("Configuración de Firebase no válida para este portal.");
@@ -24,6 +28,7 @@ if (firebaseConfig.projectId !== EXPECTED_PROJECT_ID) {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+if (localPilot) connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
 
 const loadingView = document.querySelector("#loading-view");
 const loginView = document.querySelector("#login-view");
@@ -184,9 +189,9 @@ loginForm.addEventListener("submit", async (event) => {
       emailInput.value.trim(),
       passwordInput.value
     );
-  } catch {
+  } catch (error) {
     await signOut(auth).catch(() => {});
-    showError("No fue posible iniciar sesión. Verifica tus datos e intenta nuevamente.");
+    showError(signInFailureMessage(error, localPilot));
   } finally {
     passwordInput.value = "";
     setFormPending(false);

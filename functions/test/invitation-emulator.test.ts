@@ -13,6 +13,7 @@ import { InvitationAcceptanceService } from "../src/invitations/invitation-accep
 import { InvitationTokenKeyring } from "../src/invitations/invitation-token.js";
 import { FirestoreWebhookReplayStore } from "../src/invitations/firestore-webhook-replay-store.js";
 import { InvitationReconciliationService } from "../src/invitations/invitation-reconciliation-service.js";
+import { InvitationGoogleProofService } from "../src/identities/identity-invitation-google-proof-service.js";
 import type { UserDirectory } from "../src/users/user-query-service.js";
 
 const principal: AdminPrincipal = {
@@ -93,6 +94,88 @@ beforeAll(() => {
 afterAll(async () => { await deleteApp(firebaseApp); });
 
 describe("C1/C2 invitation provisioning with emulators", () => {
+  it("opens a simulated invitation only to an authorized local Super Admin", async () => {
+    const email = `local-open-${randomUUID()}@plcocina.test`;
+    const tokens = new InvitationTokenKeyring(new Map([[1, Buffer.alloc(32, 7)]]), 1);
+    const provider = new SimulatedInvitationEmailProvider();
+    const app = createAdminApp({
+      verifyIdToken: async () => ({ uid: principal.uid, sub: principal.uid, email: principal.email, auth_time: 1, iat: 1, super_admin: true } as DecodedIdToken),
+      origins: new Set(["https://localhost:8443"]), firestore: db, userDirectory: directory,
+      protectedSuperAdminUid: "protected-super-admin", invitationTokens: tokens,
+      invitationEmailProvider: provider, localInvitationAccessEnabled: true
+    });
+    const service = new InvitationService(directory, db, tokens, provider, "protected-super-admin", () => Timestamp.now(), "plcocina.test");
+    const created = await create(service, email);
+    const denied = await request(app).post(`/api/admin/invitations/${created.invitationId}/open-test`).set("Origin", "https://localhost:8443");
+    expect(denied.status).toBe(401);
+    expect(denied.headers.location).toBeUndefined();
+    expect(denied.body.data).toBeUndefined();
+
+    const productionLikeApp = createAdminApp({
+      verifyIdToken: async () => ({ uid: principal.uid, sub: principal.uid, email: principal.email, auth_time: 1, iat: 1, super_admin: true } as DecodedIdToken),
+      origins: new Set(["https://localhost:8443"]), firestore: db, userDirectory: directory,
+      protectedSuperAdminUid: "protected-super-admin", invitationTokens: tokens,
+      invitationEmailProvider: provider
+    });
+    const unavailable = await request(productionLikeApp).post(`/api/admin/invitations/${created.invitationId}/open-test`)
+      .set("Authorization", "Bearer admin-token").set("Origin", "https://localhost:8443");
+    expect(unavailable.status).toBe(404);
+    expect(unavailable.body.data).toBeUndefined();
+
+    const opened = await request(app).post(`/api/admin/invitations/${created.invitationId}/open-test`)
+      .set("Authorization", "Bearer admin-token").set("Origin", "https://localhost:8443");
+    expect(opened.status).toBe(200);
+    expect(opened.headers["cache-control"]).toContain("no-store");
+    expect(opened.body.data?.invitationId).toBe(created.invitationId);
+    const token = opened.body.data?.token;
+    expect(typeof token === "string" && /^[A-Za-z0-9_-]{43}$/.test(token)).toBe(true);
+    expect((await new InvitationAcceptanceService(directory, db, tokens, "protected-super-admin")
+      .validate({ invitationId: created.invitationId, token }, randomUUID())).valid).toBe(true);
+    await revoke(service, created.invitationId, created.revision);
+  });
+
+  it("creates a complete Google v2 profile on the admin route, starts proof, resends, and revokes", async () => {
+    const email = `http-google-${randomUUID()}@plcocina.com`;
+    const tokens = new InvitationTokenKeyring(new Map([[1, Buffer.alloc(32, 7)]]), 1);
+    const provider = new SimulatedInvitationEmailProvider();
+    const proof = new InvitationGoogleProofService(db, tokens, { verify: async () => { throw new Error("Unused verifier"); } });
+    const app = createAdminApp({
+      verifyIdToken: async () => ({ uid: principal.uid, sub: principal.uid, email: principal.email, auth_time: 1, iat: 1, super_admin: true } as DecodedIdToken),
+      origins: new Set(["https://apps.plcocina.com"]), firestore: db, userDirectory: directory,
+      protectedSuperAdminUid: "protected-super-admin", googleWorkspaceDomain: "plcocina.com",
+      invitationTokens: tokens, invitationEmailProvider: provider, invitationGoogleProofService: () => proof
+    });
+    const invitationId = randomUUID();
+    const issued = await request(app).post("/api/admin/invitations")
+      .set("Authorization", "Bearer admin-token").set("Idempotency-Key", invitationId)
+      .send({ displayName: "Invitado Workspace", email, verificationMethod: "googleWorkspace" });
+    expect(issued.status).toBe(201);
+    const { uid, revision } = issued.body.data;
+    const authUser = await getAuth(firebaseApp).getUser(uid);
+    expect(authUser.disabled).toBe(true);
+    const profile = (await db.collection("users").doc(uid).get()).data();
+    expect(profile).toMatchObject({ uid, version: 2, identityContractVersion: "2.1", authMethod: "googleWorkspace",
+      status: "invited", authDisabled: true, activationStatus: "pending", googleWorkspace: { linkingStatus: "declared" } });
+    const token = provider.deliveries.at(-1)!.message.token;
+    const started = await request(app).post("/api/invitations/google-bootstrap/proof/start")
+      .set("x-forwarded-proto", "https").send({ invitationId, token });
+    expect(started.status).toBe(200);
+    expect((await db.collection("identityInvitationGoogleProofChallenges").doc(started.body.data.challengeId).get()).exists).toBe(true);
+
+    const resent = await request(app).post(`/api/admin/invitations/${invitationId}/resend`)
+      .set("Authorization", "Bearer admin-token").set("Idempotency-Key", randomUUID())
+      .send({ expectedRevision: revision });
+    expect(resent.status).toBe(200);
+    expect((await db.collection("users").doc(uid).get()).data()).toMatchObject({ uid, version: 2, authMethod: "googleWorkspace", authDisabled: true });
+    const revoked = await request(app).post(`/api/admin/invitations/${invitationId}/revoke`)
+      .set("Authorization", "Bearer admin-token").set("Idempotency-Key", randomUUID())
+      .send({ expectedRevision: resent.body.data.revision, reason: "Prueba de fixture" });
+    expect(revoked.status).toBe(200);
+    expect((await db.collection("users").doc(uid).get()).data()).toMatchObject({ uid, version: 2, status: "disabled", authDisabled: true, invitationStatus: "revoked" });
+    expect((await getAuth(firebaseApp).getUser(uid)).disabled).toBe(true);
+
+  });
+
   it("accepts verificationMethod through the administrative HTTP route and persists it", async () => {
     const email = `http-admin-${randomUUID()}@example.net`;
     const response = await request(httpApp()).post("/api/admin/invitations")

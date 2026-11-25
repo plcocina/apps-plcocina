@@ -25,9 +25,9 @@ function jwt(subject: string, email: string, nonce: string) {
     sub: subject, email, email_verified: true, hd: "plcocina.com", nonce, iat, exp: iat + 600 });
   return `${head}.${body}.${sign("RSA-SHA256", Buffer.from(`${head}.${body}`), privateKey).toString("base64url")}`;
 }
-async function fixture(email = `empleado-${randomUUID()}@plcocina.com`, corporateEmail = true) {
+async function fixture(email = `empleado-${randomUUID()}@plcocina.com`) {
   const invitationId = randomUUID(); const uid = `preprovisioned-${randomUUID()}`; const material = tokens.issue(invitationId, 1);
-  await getAuth(app).createUser({ uid, email: corporateEmail ? email : undefined, disabled: true });
+  await getAuth(app).createUser({ uid, email, disabled: true });
   const stamp = clock(); const expiresAt = Timestamp.fromMillis(stamp.toMillis() + 3_600_000);
   await db.collection("invitations").doc(invitationId).set({ invitationId, email, normalizedEmail: email.toLowerCase(), displayName: "Empleado", verificationMethod: "googleWorkspace", uid,
     status: "active", token: { hash: material.hash, generation: 1, salt: material.salt, keyVersion: material.keyVersion, issuedAt: stamp, expiresAt },
@@ -36,11 +36,12 @@ async function fixture(email = `empleado-${randomUUID()}@plcocina.com`, corporat
     expiresAt, createdAt: stamp, createdBy: "admin", updatedAt: stamp, updatedBy: "admin", pendingOperationId: null, consumeOperationId: null,
     consumeLeaseExpiresAt: null, passwordSetAt: null, confirmationExpiresAt: null, deliveredAt: stamp, acceptedAt: null, revokedAt: null, revokedBy: null,
     revokeReason: null, expiredAt: null, resendCount: 0, lastSentAt: stamp, revision: 1, version: 2 });
-  await db.collection("users").doc(uid).set({ displayName: "Empleado", status: "invited", authDisabled: true, invitationStatus: "pending", authMethod: corporateEmail ? "email" : "sms",
-    phoneE164: corporateEmail ? null : "+15551234567", normalizedPhone: corporateEmail ? null : "+15551234567", email: corporateEmail ? email : null,
-    normalizedEmail: corporateEmail ? email.toLowerCase() : null, phoneVerifiedAt: null, emailVerifiedAt: null, activationStatus: "pending",
+  await db.collection("users").doc(uid).set({ uid, displayName: "Empleado", status: "invited", authDisabled: true, invitationStatus: "pending", authMethod: "googleWorkspace",
+    phoneE164: null, normalizedPhone: null, email, normalizedEmail: email.toLowerCase(), phoneVerifiedAt: null, emailVerifiedAt: null,
+    googleWorkspace: { authorizedDomain: "plcocina.com", subject: null, linkingStatus: "declared", verificationStatus: "unverified",
+      verifiedAt: null, linkedAt: null, verificationRevision: 1, operationId: null }, activationStatus: "pending",
     credentialRevision: 1, authorizationRevision: 1, sessionValidAfter: stamp, createdAt: stamp, createdBy: "admin", updatedAt: stamp, updatedBy: "admin",
-    revision: 1, pendingOperationId: null, version: 2 });
+    revision: 1, pendingOperationId: null, identityContractVersion: "2.1", version: 2 });
   const service = new InvitationGoogleProofService(db, tokens, {
     verify: async (input) => new (await import("../src/identities/google-token-verifier.js")).GoogleIdentityTokenVerifier(config, new LocalCertificates(),
       new GoogleAuthLibraryJwtCryptographicVerifier(), () => now).verify(input)
@@ -93,9 +94,10 @@ describe("invitation-bound initial Google proof", () => {
     await expect(f.service.verify({ invitationId: f.invitationId, token: f.token, challengeId: start.challengeId, nonce: start.nonce,
       googleIdToken: jwt("google-subject", f.email, "a-different-server-nonce-value") })).rejects.toMatchObject({ code: "NONCE_INVALID" });
   });
-  it("rejects a preprovisioned profile without a trusted corporate email", async () => {
-    const f = await fixture(undefined, false);
-    await expect(f.service.start({ invitationId: f.invitationId, token: f.token })).rejects.toMatchObject({ code: "CORPORATE_EMAIL_REQUIRED" });
+  it("rejects a Google v2 profile whose email does not match its invitation", async () => {
+    const f = await fixture();
+    await db.collection("users").doc(f.uid).update({ normalizedEmail: `other-${randomUUID()}@plcocina.com` });
+    await expect(f.service.start({ invitationId: f.invitationId, token: f.token })).rejects.toMatchObject({ code: "PROFILE_INVALID" });
   });
   it("rejects a revoked invitation", async () => {
     const f = await fixture(); const start = await f.service.start({ invitationId: f.invitationId, token: f.token });

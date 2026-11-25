@@ -5,7 +5,7 @@ import { invitationDocumentSchema } from "../models/admin-collections.js";
 import { effectiveInvitationStatus } from "../invitations/invitation-transitions.js";
 import { InvitationTokenKeyring } from "../invitations/invitation-token.js";
 import { createTrustedNonceContext, type VerifiedGoogleIdentity, type VerifyGoogleIdTokenInput } from "./google-token-verifier.js";
-import { normalizeIdentityEmail, normalizeGoogleSubject, userV2DocumentSchema } from "./identity-models.js";
+import { normalizeIdentityEmail, normalizeGoogleSubject, googleWorkspaceUserV21DocumentSchema } from "./identity-models.js";
 
 const inputSchema = z.object({ invitationId: z.string().uuid(), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
 const verifySchema = inputSchema.extend({ challengeId: z.string().uuid(), nonce: z.string().min(16).max(512), googleIdToken: z.string().min(1).max(20_000) }).strict();
@@ -44,7 +44,7 @@ export class InvitationGoogleProofService {
     if (!invitation.success || !this.validInvitation(invitation.data, value.token)) throw new InvitationGoogleProofError("INVITATION_INVALID");
     const profileRef = this.db.collection("users").doc(invitation.data.uid);
     const profileSnapshotByUid = await profileRef.get();
-    const profile = userV2DocumentSchema.safeParse(profileSnapshotByUid.data());
+    const profile = googleWorkspaceUserV21DocumentSchema.safeParse(profileSnapshotByUid.data());
     if (!profileSnapshotByUid.exists || !profile.success || profile.data.authDisabled !== true || profile.data.status !== "invited") {
       throw new InvitationGoogleProofError("PROFILE_INVALID");
     }
@@ -59,7 +59,7 @@ export class InvitationGoogleProofService {
     await this.db.runTransaction(async (transaction) => {
       const [currentInvitation, currentProfile] = await Promise.all([transaction.get(invitationRef), transaction.get(profileRef)]);
       const parsedInvitation = invitationDocumentSchema.safeParse(currentInvitation.data());
-      const parsedProfile = userV2DocumentSchema.safeParse(currentProfile.data());
+      const parsedProfile = googleWorkspaceUserV21DocumentSchema.safeParse(currentProfile.data());
       if (!currentInvitation.exists || !parsedInvitation.success || !this.validInvitation(parsedInvitation.data, value.token)
         || parsedInvitation.data.uid !== challenge.uid || parsedInvitation.data.token?.generation !== challenge.credentialGeneration
         || parsedInvitation.data.token?.hash !== challenge.credentialHash || !currentProfile.exists || !parsedProfile.success
@@ -87,7 +87,7 @@ export class InvitationGoogleProofService {
       throw new InvitationGoogleProofError("CHALLENGE_INVALID");
     }
     const profileRef = this.db.collection("users").doc(invitation.data.uid);
-    const profileSnapshot = await profileRef.get(); const profile = userV2DocumentSchema.safeParse(profileSnapshot.data());
+    const profileSnapshot = await profileRef.get(); const profile = googleWorkspaceUserV21DocumentSchema.safeParse(profileSnapshot.data());
     if (!profileSnapshot.exists || !profile.success || !profile.data.normalizedEmail || profile.data.normalizedEmail !== challenge.data.expectedEmail
       || profile.data.authDisabled !== true || profile.data.status !== "invited") throw new InvitationGoogleProofError("PROFILE_INVALID");
     if (challenge.data.expiresAt.toMillis() <= this.now().toMillis()) throw new InvitationGoogleProofError("CHALLENGE_EXPIRED");
@@ -105,7 +105,7 @@ export class InvitationGoogleProofService {
         transaction.get(invitationRef), transaction.get(challengeRef), transaction.get(profileRef)
       ]);
       const parsedInvitation = invitationDocumentSchema.safeParse(currentInvitation.data());
-      const parsedChallenge = challengeSchema.safeParse(currentChallenge.data()); const parsedProfile = userV2DocumentSchema.safeParse(currentProfile.data());
+      const parsedChallenge = challengeSchema.safeParse(currentChallenge.data()); const parsedProfile = googleWorkspaceUserV21DocumentSchema.safeParse(currentProfile.data());
       if (!currentInvitation.exists || !parsedInvitation.success || !this.validInvitation(parsedInvitation.data, value.token)
         || parsedInvitation.data.uid !== proof.uid || parsedInvitation.data.token?.generation !== proof.credentialGeneration
         || parsedInvitation.data.token?.hash !== challenge.data!.credentialHash || !currentChallenge.exists || !parsedChallenge.success

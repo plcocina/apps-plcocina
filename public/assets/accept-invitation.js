@@ -205,7 +205,7 @@ export async function startAcceptance(initialCredentials, dependencies = {}) {
       const challenge = await api.startInvitationGoogleProof(invitationId, token);
       if (!googleBusy) return;
       await renderGoogleButton(challenge, "initial");
-      googleStatus.textContent = "Usa el botón oficial de Google para verificar tu identidad.";
+      googleStatus.textContent = "Pulsa el botón de Google para iniciar sesión y validar tu identidad.";
     } catch (error) {
       clearGoogleChallenge();
       googleStatus.textContent = error?.message === "GOOGLE_CLIENT_ID_MISSING"
